@@ -1,0 +1,22 @@
+{
+  "name": "ccmonitor",
+  "version": "1.0.0",
+  "description": "Claude Code activity monitor with web dashboard",
+  "private": true,
+  "workspaces": [
+    "hooks",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run web\"",
+    "server": "npm run dev -w ccmonitor-server",
+    "web": "npm run dev -w ccmonitor-web",
+    "build": "npm run build -w ccmonitor-hooks && npm run build -w ccmonitor-server && npm run build -w ccmonitor-web",
+    "install-hooks": "npm run install-hooks -w ccmonitor-hooks"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.3.3"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "ccmonitor-hooks",
+  "version": "1.0.0",
+  "description": "Claude Code hooks for ccmonitor",
+  "type": "module",
+  "main": "dist/forward.js",
+  "scripts": {
+    "build": "tsc",
+    "install-hooks": "node dist/install.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  }
+}

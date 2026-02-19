@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Code Monitor</title>
+    <script>
+      // Prevent FOUC (Flash of Unstyled Content) by applying theme class immediately
+      (function() {
+        const stored = localStorage.getItem('theme-storage');
+        const theme = stored ? JSON.parse(stored).state?.theme || 'system' : 'system';
+        const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        const effectiveTheme = theme === 'system' ? systemTheme : theme;
+        document.documentElement.classList.add(effectiveTheme);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
