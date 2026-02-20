@@ -95,6 +95,8 @@ export interface Session {
   ended_at: string | null;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_cache_read_tokens: number;
+  total_cache_write_tokens: number;
   total_cost_usd: number;
   version: string | null;
 }
@@ -111,6 +113,8 @@ export interface Event {
   content: string | null;
   tokens_input: number | null;
   tokens_output: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
   cost?: number | null;
   model: string | null;
   timestamp: string;
@@ -140,6 +144,8 @@ export interface SessionSummary {
   endedAt: string | null;
   totalInputTokens: number;
   totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
   totalCostUsd: number;
   eventCount: number;
   toolCallCount: number;
@@ -155,6 +161,8 @@ export interface EventItem {
   content?: string;
   tokensInput?: number;
   tokensOutput?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   cost?: number;
   model?: string;
   timestamp: string;
@@ -172,8 +180,11 @@ export interface CostSummary {
   date: string;
   inputTokens: number;
   outputTokens: number;
-  cacheTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   costUsd: number;
+  costWithoutCache: number;  // What it would have cost without caching
+  cacheSavings: number;      // Amount saved by caching
 }
 
 export interface Stats {

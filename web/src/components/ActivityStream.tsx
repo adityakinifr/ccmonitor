@@ -80,8 +80,15 @@ function EventCard({ event }: { event: EventItem }) {
             Session: {event.sessionId.slice(0, 8)}...
           </span>
           {event.tokensInput !== undefined && (
-            <span>
-              Tokens: {event.tokensInput} in / {event.tokensOutput || 0} out
+            <span className="flex items-center gap-2">
+              <span>In: <span className="font-mono">{event.tokensInput}</span></span>
+              <span>Out: <span className="font-mono">{event.tokensOutput || 0}</span></span>
+              {event.cacheReadTokens !== undefined && event.cacheReadTokens > 0 && (
+                <span className="text-cyan-500">Cache↓: <span className="font-mono">{event.cacheReadTokens}</span></span>
+              )}
+              {event.cacheWriteTokens !== undefined && event.cacheWriteTokens > 0 && (
+                <span className="text-orange-500">Cache↑: <span className="font-mono">{event.cacheWriteTokens}</span></span>
+              )}
             </span>
           )}
           {event.cost !== undefined && event.cost > 0 && (

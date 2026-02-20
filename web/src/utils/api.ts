@@ -232,3 +232,44 @@ export async function getAIAnalysis(apiKey: string): Promise<AIAnalysisResult> {
   const data = await response.json();
   return data.analysis;
 }
+
+// Project Analysis
+export interface ProjectStats {
+  projectPath: string;
+  projectName: string;
+  gitBranches: string[];
+  totalCost: number;
+  totalSessions: number;
+  totalEvents: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
+  firstSessionAt: string;
+  lastSessionAt: string;
+}
+
+export interface ProjectCostByDay {
+  date: string;
+  costUsd: number;
+  sessions: number;
+  events: number;
+}
+
+export interface ProjectToolBreakdown {
+  toolName: string;
+  totalCost: number;
+  count: number;
+}
+
+export async function getProjectStats(): Promise<ProjectStats[]> {
+  const data = await fetchJson<{ projects: ProjectStats[] }>('/stats/projects');
+  return data.projects;
+}
+
+export async function getProjectCosts(projectPath: string, days = 30): Promise<{
+  costs: ProjectCostByDay[];
+  tools: ProjectToolBreakdown[];
+}> {
+  return fetchJson(`/stats/projects/costs?projectPath=${encodeURIComponent(projectPath)}&days=${days}`);
+}

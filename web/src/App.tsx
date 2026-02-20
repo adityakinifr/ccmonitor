@@ -6,6 +6,7 @@ import { SessionDetail } from '@/components/SessionDetail';
 import { McpStats } from '@/components/McpStats';
 import { CostTracker } from '@/components/CostTracker';
 import { CostAnalyzer } from '@/components/CostAnalyzer';
+import { ProjectAnalysis } from '@/components/ProjectAnalysis';
 import { AIOptimizer } from '@/components/AIOptimizer';
 
 function App() {
@@ -19,6 +20,7 @@ function App() {
           <Route path="mcp" element={<McpStats />} />
           <Route path="costs" element={<CostTracker />} />
           <Route path="analyze" element={<CostAnalyzer />} />
+          <Route path="projects" element={<ProjectAnalysis />} />
           <Route path="optimize" element={<AIOptimizer />} />
         </Route>
       </Routes>

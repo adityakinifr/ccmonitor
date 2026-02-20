@@ -33,6 +33,8 @@ export function registerSessionsRoutes(app: FastifyInstance, repo: Repository): 
         endedAt: session.ended_at,
         totalInputTokens: session.total_input_tokens,
         totalOutputTokens: session.total_output_tokens,
+        totalCacheReadTokens: session.total_cache_read_tokens || 0,
+        totalCacheWriteTokens: session.total_cache_write_tokens || 0,
         totalCostUsd: session.total_cost_usd,
         version: session.version,
       },

@@ -20,12 +20,17 @@ export class Repository {
 
   // Sessions
   upsertSession(session: Partial<Session> & { id: string }): void {
-    const existing = this.db.prepare('SELECT id FROM sessions WHERE id = ?').get(session.id);
+    const existing = this.db.prepare('SELECT id, started_at FROM sessions WHERE id = ?').get(session.id) as { id: string; started_at: string } | undefined;
 
     if (existing) {
       const updates: string[] = [];
       const values: unknown[] = [];
 
+      // Update started_at if the new timestamp is earlier (ensures we track actual session start)
+      if (session.started_at !== undefined && session.started_at < existing.started_at) {
+        updates.push('started_at = ?');
+        values.push(session.started_at);
+      }
       if (session.ended_at !== undefined) {
         updates.push('ended_at = ?');
         values.push(session.ended_at);
@@ -41,6 +46,14 @@ export class Repository {
       if (session.total_cost_usd !== undefined) {
         updates.push('total_cost_usd = total_cost_usd + ?');
         values.push(session.total_cost_usd);
+      }
+      if (session.total_cache_read_tokens !== undefined) {
+        updates.push('total_cache_read_tokens = total_cache_read_tokens + ?');
+        values.push(session.total_cache_read_tokens);
+      }
+      if (session.total_cache_write_tokens !== undefined) {
+        updates.push('total_cache_write_tokens = total_cache_write_tokens + ?');
+        values.push(session.total_cache_write_tokens);
       }
 
       if (updates.length > 0) {
@@ -98,6 +111,8 @@ export class Repository {
       endedAt: row.ended_at,
       totalInputTokens: row.total_input_tokens,
       totalOutputTokens: row.total_output_tokens,
+      totalCacheReadTokens: row.total_cache_read_tokens || 0,
+      totalCacheWriteTokens: row.total_cache_write_tokens || 0,
       totalCostUsd: row.total_cost_usd,
       eventCount: row.event_count,
       toolCallCount: row.tool_call_count,
@@ -109,8 +124,8 @@ export class Repository {
     const result = this.db
       .prepare(
         `
-      INSERT INTO events (session_id, event_type, hook_event_name, entry_type, tool_name, tool_input, tool_response, content, tokens_input, tokens_output, cost, model, timestamp, uuid, parent_uuid, raw_data)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO events (session_id, event_type, hook_event_name, entry_type, tool_name, tool_input, tool_response, content, tokens_input, tokens_output, cache_read_tokens, cache_write_tokens, cost, model, timestamp, uuid, parent_uuid, raw_data)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `
       )
       .run(
@@ -124,6 +139,8 @@ export class Repository {
         event.content,
         event.tokens_input,
         event.tokens_output,
+        event.cache_read_tokens,
+        event.cache_write_tokens,
         event.cost,
         event.model,
         event.timestamp,
@@ -137,7 +154,7 @@ export class Repository {
 
   getEvents(sessionId?: string, limit = 100, offset = 0): EventItem[] {
     let query = `
-      SELECT id, session_id, event_type, hook_event_name, entry_type, tool_name, content, tokens_input, tokens_output, cost, model, timestamp
+      SELECT id, session_id, event_type, hook_event_name, entry_type, tool_name, content, tokens_input, tokens_output, cache_read_tokens, cache_write_tokens, cost, model, timestamp
       FROM events
     `;
     const params: unknown[] = [];
@@ -162,6 +179,8 @@ export class Repository {
       content: row.content || undefined,
       tokensInput: row.tokens_input || undefined,
       tokensOutput: row.tokens_output || undefined,
+      cacheReadTokens: row.cache_read_tokens || undefined,
+      cacheWriteTokens: row.cache_write_tokens || undefined,
       cost: row.cost || undefined,
       model: row.model || undefined,
       timestamp: row.timestamp,
@@ -173,9 +192,12 @@ export class Repository {
   }
 
   checkEventExists(sessionId: string, uuid: string): boolean {
+    // Check UUID globally - UUIDs are unique across all sessions
+    // This prevents double counting when the same event appears in multiple transcript files
+    // (e.g., session resumption, forking, or subagent transcripts)
     const result = this.db
-      .prepare('SELECT 1 FROM events WHERE session_id = ? AND uuid = ? LIMIT 1')
-      .get(sessionId, uuid);
+      .prepare('SELECT 1 FROM events WHERE uuid = ? LIMIT 1')
+      .get(uuid);
     return !!result;
   }
 
@@ -304,37 +326,87 @@ export class Repository {
     };
   }
 
+  // Uses local timezone for date grouping
   getCostsByDay(days = 30): CostSummary[] {
     const rows = this.db
       .prepare(
         `
       SELECT
-        DATE(started_at) as date,
+        DATE(started_at, 'localtime') as date,
         SUM(total_input_tokens) as input_tokens,
         SUM(total_output_tokens) as output_tokens,
-        0 as cache_tokens,
+        SUM(COALESCE(total_cache_read_tokens, 0)) as cache_read_tokens,
+        SUM(COALESCE(total_cache_write_tokens, 0)) as cache_write_tokens,
         SUM(total_cost_usd) as cost_usd
       FROM sessions
-      WHERE started_at >= DATE('now', '-' || ? || ' days')
-      GROUP BY DATE(started_at)
-      ORDER BY date DESC
+      WHERE DATE(started_at, 'localtime') >= DATE('now', 'localtime', '-' || ? || ' days')
+      GROUP BY DATE(started_at, 'localtime')
+      ORDER BY date ASC
     `
       )
       .all(days) as {
       date: string;
       input_tokens: number;
       output_tokens: number;
-      cache_tokens: number;
+      cache_read_tokens: number;
+      cache_write_tokens: number;
       cost_usd: number;
     }[];
 
-    return rows.map((row) => ({
-      date: row.date,
-      inputTokens: row.input_tokens,
-      outputTokens: row.output_tokens,
-      cacheTokens: row.cache_tokens,
-      costUsd: row.cost_usd,
-    }));
+    // Create a map for quick lookup
+    const dataMap = new Map<string, typeof rows[0]>();
+    for (const row of rows) {
+      dataMap.set(row.date, row);
+    }
+
+    // Fill gaps for all days in the range (using local timezone)
+    const result: CostSummary[] = [];
+    const endDate = new Date();
+    endDate.setHours(0, 0, 0, 0);
+    const startDate = new Date(endDate);
+    startDate.setDate(startDate.getDate() - days + 1);
+
+    // Average input rate for calculating savings (weighted toward Sonnet as most common)
+    const AVG_INPUT_RATE = 5.0;  // $/M tokens
+    const AVG_CACHE_READ_RATE = 0.5;  // $/M tokens (10% of input)
+
+    for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
+      // Format as local date (YYYY-MM-DD)
+      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const data = dataMap.get(dateStr);
+
+      if (data) {
+        // Calculate what it would have cost without caching
+        // Cache read tokens would have been charged at full input rate instead of discounted rate
+        const cacheReadSavings = (data.cache_read_tokens / 1_000_000) * (AVG_INPUT_RATE - AVG_CACHE_READ_RATE);
+        const costWithoutCache = data.cost_usd + cacheReadSavings;
+
+        result.push({
+          date: data.date,
+          inputTokens: data.input_tokens,
+          outputTokens: data.output_tokens,
+          cacheReadTokens: data.cache_read_tokens,
+          cacheWriteTokens: data.cache_write_tokens,
+          costUsd: data.cost_usd,
+          costWithoutCache,
+          cacheSavings: cacheReadSavings,
+        });
+      } else {
+        // Gap - no activity this day
+        result.push({
+          date: dateStr,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          costUsd: 0,
+          costWithoutCache: 0,
+          cacheSavings: 0,
+        });
+      }
+    }
+
+    return result;
   }
 
   // File positions for transcript watching
@@ -363,39 +435,79 @@ export class Repository {
       );
   }
 
-  // Get today's costs by minute for granular trending
+  // Get today's costs by minute for granular trending (with gaps filled)
+  // Uses local timezone for "today" calculation
   getTodayCostsByMinute(): { timestamp: string; cost: number; tokens: number; runningCost: number; runningTokens: number }[] {
     const rows = this.db
       .prepare(
         `
       SELECT
-        strftime('%Y-%m-%dT%H:%M:00Z', timestamp) as minute,
+        strftime('%Y-%m-%dT%H:%M:00', timestamp, 'localtime') as minute,
         SUM(COALESCE(cost, 0)) as cost,
         SUM(COALESCE(tokens_input, 0) + COALESCE(tokens_output, 0)) as tokens
       FROM events
-      WHERE DATE(timestamp) = DATE('now')
+      WHERE DATE(timestamp, 'localtime') = DATE('now', 'localtime')
         AND cost IS NOT NULL
         AND cost > 0
-      GROUP BY strftime('%Y-%m-%dT%H:%M:00Z', timestamp)
+      GROUP BY strftime('%Y-%m-%dT%H:%M:00', timestamp, 'localtime')
       ORDER BY minute ASC
     `
       )
       .all() as { minute: string; cost: number; tokens: number }[];
 
-    // Calculate running totals
+    if (rows.length === 0) {
+      return [];
+    }
+
+    // Create a map for quick lookup
+    const dataMap = new Map<string, { cost: number; tokens: number }>();
+    for (const row of rows) {
+      dataMap.set(row.minute, { cost: row.cost, tokens: row.tokens });
+    }
+
+    // Fill gaps between first data point and now (using local time)
+    const result: { timestamp: string; cost: number; tokens: number; runningCost: number; runningTokens: number }[] = [];
+    const firstTime = new Date(rows[0].minute);
+    const now = new Date();
+
+    // Round now down to current minute
+    now.setSeconds(0, 0);
+
     let runningCost = 0;
     let runningTokens = 0;
-    return rows.map((row) => {
-      runningCost += row.cost;
-      runningTokens += row.tokens;
-      return {
-        timestamp: row.minute,
-        cost: row.cost,
-        tokens: row.tokens,
-        runningCost,
-        runningTokens,
-      };
-    });
+    let currentTime = new Date(firstTime);
+
+    while (currentTime <= now) {
+      // Format as local time (YYYY-MM-DDTHH:MM:00)
+      const timeStr = `${currentTime.getFullYear()}-${String(currentTime.getMonth() + 1).padStart(2, '0')}-${String(currentTime.getDate()).padStart(2, '0')}T${String(currentTime.getHours()).padStart(2, '0')}:${String(currentTime.getMinutes()).padStart(2, '0')}:00`;
+      const data = dataMap.get(timeStr);
+
+      if (data) {
+        runningCost += data.cost;
+        runningTokens += data.tokens;
+        result.push({
+          timestamp: timeStr,
+          cost: data.cost,
+          tokens: data.tokens,
+          runningCost,
+          runningTokens,
+        });
+      } else {
+        // Gap - no activity this minute
+        result.push({
+          timestamp: timeStr,
+          cost: 0,
+          tokens: 0,
+          runningCost,
+          runningTokens,
+        });
+      }
+
+      // Move to next minute
+      currentTime.setMinutes(currentTime.getMinutes() + 1);
+    }
+
+    return result;
   }
 
   // Get recent events with cost for real-time trending
@@ -422,30 +534,96 @@ export class Repository {
 
   // Cost Analysis
   analyzeCostsByTool(): { toolName: string; totalCost: number; count: number; avgCost: number; totalTokens: number }[] {
-    const rows = this.db
+    // Get tool costs (with actual tool names)
+    const toolRows = this.db
       .prepare(
         `
       SELECT
-        COALESCE(tool_name, 'No Tool (Text Response)') as tool_name,
+        tool_name,
         SUM(COALESCE(cost, 0)) as total_cost,
         COUNT(*) as count,
         AVG(COALESCE(cost, 0)) as avg_cost,
         SUM(COALESCE(tokens_input, 0) + COALESCE(tokens_output, 0)) as total_tokens
       FROM events
       WHERE cost IS NOT NULL AND cost > 0
+        AND tool_name IS NOT NULL AND tool_name != ''
       GROUP BY tool_name
-      ORDER BY total_cost DESC
     `
       )
       .all() as { tool_name: string; total_cost: number; count: number; avg_cost: number; total_tokens: number }[];
 
-    return rows.map((r) => ({
+    // Get text responses (no tool) for categorization
+    const textRows = this.db
+      .prepare(
+        `
+      SELECT
+        content,
+        COALESCE(cost, 0) as cost,
+        COALESCE(tokens_input, 0) + COALESCE(tokens_output, 0) as tokens
+      FROM events
+      WHERE cost IS NOT NULL AND cost > 0
+        AND (tool_name IS NULL OR tool_name = '')
+        AND content IS NOT NULL AND content != ''
+    `
+      )
+      .all() as { content: string; cost: number; tokens: number }[];
+
+    // Categorize text responses
+    const textCategories: Record<string, { cost: number; count: number; tokens: number }> = {};
+
+    for (const row of textRows) {
+      const content = row.content.toLowerCase();
+      let category: string;
+
+      if (content.startsWith('[thinking]') || content.includes('let me think') || content.includes('i need to')) {
+        category = 'Text: Thinking';
+      } else if (content.includes('```') || content.includes('function') || content.includes('const ') || content.includes('import ')) {
+        category = 'Text: Code/Explanation';
+      } else if (content.includes('plan') || content.includes('step') || content.includes('first,') || content.includes('approach')) {
+        category = 'Text: Planning';
+      } else if (content.includes('error') || content.includes('issue') || content.includes('fix') || content.includes('bug')) {
+        category = 'Text: Error Analysis';
+      } else if (content.includes('tool') || content.includes('let me') || content.includes("i'll") || content.includes('i will')) {
+        category = 'Text: Tool Intro';
+      } else if (row.content.length < 100) {
+        category = 'Text: Short';
+      } else if (row.content.length > 500) {
+        category = 'Text: Long';
+      } else {
+        category = 'Text: Other';
+      }
+
+      if (!textCategories[category]) {
+        textCategories[category] = { cost: 0, count: 0, tokens: 0 };
+      }
+      textCategories[category].cost += row.cost;
+      textCategories[category].count += 1;
+      textCategories[category].tokens += row.tokens;
+    }
+
+    // Combine tool rows and text categories
+    const results = toolRows.map((r) => ({
       toolName: r.tool_name,
       totalCost: r.total_cost,
       count: r.count,
       avgCost: r.avg_cost,
       totalTokens: r.total_tokens,
     }));
+
+    for (const [category, data] of Object.entries(textCategories)) {
+      if (data.count > 0) {
+        results.push({
+          toolName: category,
+          totalCost: data.cost,
+          count: data.count,
+          avgCost: data.cost / data.count,
+          totalTokens: data.tokens,
+        });
+      }
+    }
+
+    // Sort by total cost descending
+    return results.sort((a, b) => b.totalCost - a.totalCost);
   }
 
   analyzeCostsByModel(): { model: string; totalCost: number; count: number; avgCost: number; totalTokens: number }[] {
@@ -801,6 +979,134 @@ export class Repository {
       cost: row.cost || undefined,
       model: row.model || undefined,
       timestamp: row.timestamp,
+    }));
+  }
+
+  // Project Analysis
+  getProjectStats(): {
+    projectPath: string;
+    projectName: string;
+    gitBranches: string[];
+    totalCost: number;
+    totalSessions: number;
+    totalEvents: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCacheReadTokens: number;
+    totalCacheWriteTokens: number;
+    firstSessionAt: string;
+    lastSessionAt: string;
+  }[] {
+    // Use subquery to avoid multiplication from JOIN
+    const rows = this.db
+      .prepare(
+        `
+      SELECT
+        s.project_path,
+        SUM(s.total_cost_usd) as total_cost,
+        COUNT(s.id) as total_sessions,
+        SUM(s.total_input_tokens) as total_input_tokens,
+        SUM(s.total_output_tokens) as total_output_tokens,
+        SUM(COALESCE(s.total_cache_read_tokens, 0)) as total_cache_read_tokens,
+        SUM(COALESCE(s.total_cache_write_tokens, 0)) as total_cache_write_tokens,
+        MIN(s.started_at) as first_session_at,
+        MAX(s.started_at) as last_session_at,
+        GROUP_CONCAT(DISTINCT s.git_branch) as git_branches,
+        (SELECT COUNT(*) FROM events e WHERE e.session_id IN (
+          SELECT id FROM sessions WHERE project_path = s.project_path
+        )) as total_events
+      FROM sessions s
+      WHERE s.project_path IS NOT NULL AND s.project_path != ''
+      GROUP BY s.project_path
+      ORDER BY total_cost DESC
+    `
+      )
+      .all() as {
+        project_path: string;
+        total_cost: number;
+        total_sessions: number;
+        total_events: number;
+        total_input_tokens: number;
+        total_output_tokens: number;
+        total_cache_read_tokens: number;
+        total_cache_write_tokens: number;
+        first_session_at: string;
+        last_session_at: string;
+        git_branches: string | null;
+      }[];
+
+    return rows.map((r) => ({
+      projectPath: r.project_path,
+      projectName: r.project_path.split('/').pop() || r.project_path,
+      gitBranches: r.git_branches ? r.git_branches.split(',').filter(b => b && b.trim()) : [],
+      totalCost: r.total_cost || 0,
+      totalSessions: r.total_sessions,
+      totalEvents: r.total_events || 0,
+      totalInputTokens: r.total_input_tokens || 0,
+      totalOutputTokens: r.total_output_tokens || 0,
+      totalCacheReadTokens: r.total_cache_read_tokens || 0,
+      totalCacheWriteTokens: r.total_cache_write_tokens || 0,
+      firstSessionAt: r.first_session_at,
+      lastSessionAt: r.last_session_at,
+    }));
+  }
+
+  getProjectCostsByDay(projectPath: string, days = 30): {
+    date: string;
+    costUsd: number;
+    sessions: number;
+    events: number;
+  }[] {
+    const rows = this.db
+      .prepare(
+        `
+      SELECT
+        date(s.started_at, 'localtime') as date,
+        SUM(s.total_cost_usd) as cost_usd,
+        COUNT(s.id) as sessions
+      FROM sessions s
+      WHERE s.project_path = ?
+        AND s.started_at >= date('now', 'localtime', '-' || ? || ' days')
+      GROUP BY date(s.started_at, 'localtime')
+      ORDER BY date ASC
+    `
+      )
+      .all(projectPath, days) as { date: string; cost_usd: number; sessions: number }[];
+
+    return rows.map((r) => ({
+      date: r.date,
+      costUsd: r.cost_usd || 0,
+      sessions: r.sessions,
+      events: 0, // Events count removed to avoid complexity, can be added via separate query if needed
+    }));
+  }
+
+  getProjectToolBreakdown(projectPath: string): {
+    toolName: string;
+    totalCost: number;
+    count: number;
+  }[] {
+    const rows = this.db
+      .prepare(
+        `
+      SELECT
+        COALESCE(e.tool_name, 'Text Response') as tool_name,
+        SUM(COALESCE(e.cost, 0)) as total_cost,
+        COUNT(*) as count
+      FROM events e
+      JOIN sessions s ON e.session_id = s.id
+      WHERE s.project_path = ?
+        AND e.cost IS NOT NULL AND e.cost > 0
+      GROUP BY e.tool_name
+      ORDER BY total_cost DESC
+    `
+      )
+      .all(projectPath) as { tool_name: string; total_cost: number; count: number }[];
+
+    return rows.map((r) => ({
+      toolName: r.tool_name,
+      totalCost: r.total_cost || 0,
+      count: r.count,
     }));
   }
 }

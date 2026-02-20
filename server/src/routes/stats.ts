@@ -72,6 +72,25 @@ export function registerStatsRoutes(app: FastifyInstance, repo: Repository): voi
     });
   });
 
+  // Project stats
+  app.get('/api/stats/projects', async (_request, reply) => {
+    const projects = repo.getProjectStats();
+    return reply.send({ projects });
+  });
+
+  // Project cost breakdown by day
+  app.get<{
+    Querystring: { projectPath: string; days?: string };
+  }>('/api/stats/projects/costs', async (request, reply) => {
+    const { projectPath, days = '30' } = request.query;
+    if (!projectPath) {
+      return reply.status(400).send({ error: 'projectPath is required' });
+    }
+    const costs = repo.getProjectCostsByDay(projectPath, parseInt(days, 10));
+    const tools = repo.getProjectToolBreakdown(projectPath);
+    return reply.send({ costs, tools });
+  });
+
   // AI-powered analysis with Gemini
   app.post<{
     Body: { apiKey: string };

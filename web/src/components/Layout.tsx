@@ -9,6 +9,7 @@ import { useTheme } from '@/hooks/useTheme';
 const navItems = [
   { path: '/', label: 'Activity', icon: 'activity' },
   { path: '/sessions', label: 'Sessions', icon: 'terminal' },
+  { path: '/projects', label: 'Projects', icon: 'folder' },
   { path: '/mcp', label: 'MCP Tools', icon: 'plug' },
   { path: '/costs', label: 'Costs', icon: 'dollar' },
   { path: '/analyze', label: 'Analyze', icon: 'chart' },
@@ -51,6 +52,12 @@ function NavIcon({ type }: { type: string }) {
       return (
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+        </svg>
+      );
+    case 'folder':
+      return (
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
         </svg>
       );
     default:

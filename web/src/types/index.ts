@@ -6,6 +6,8 @@ export interface SessionSummary {
   endedAt: string | null;
   totalInputTokens: number;
   totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
   totalCostUsd: number;
   eventCount: number;
   toolCallCount: number;
@@ -21,6 +23,8 @@ export interface EventItem {
   content?: string;
   tokensInput?: number;
   tokensOutput?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   cost?: number;
   model?: string;
   timestamp: string;
@@ -38,8 +42,11 @@ export interface CostSummary {
   date: string;
   inputTokens: number;
   outputTokens: number;
-  cacheTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   costUsd: number;
+  costWithoutCache: number;
+  cacheSavings: number;
 }
 
 export interface Stats {
@@ -63,6 +70,8 @@ export interface SessionDetail {
   endedAt: string | null;
   totalInputTokens: number;
   totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
   totalCostUsd: number;
   version: string | null;
 }

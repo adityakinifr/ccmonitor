@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getSession } from '@/utils/api';
 import { formatDateTime, formatTokens, formatCost, truncate } from '@/utils/formatters';
@@ -14,6 +14,8 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
 import type { SessionDetail as SessionDetailType, EventItem } from '@/types';
+
+type SortOption = 'time' | 'cost-high' | 'cost-low';
 
 function getEventBadgeVariant(hookEventName?: string, entryType?: string, content?: string): 'default' | 'secondary' | 'destructive' | 'outline' {
   if (hookEventName === 'UserPromptSubmit' || entryType === 'user') return 'default';
@@ -31,6 +33,20 @@ export function SessionDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedEvents, setExpandedEvents] = useState<Set<number>>(new Set());
+  const [sortBy, setSortBy] = useState<SortOption>('time');
+
+  const sortedEvents = useMemo(() => {
+    const sorted = [...events];
+    switch (sortBy) {
+      case 'cost-high':
+        return sorted.sort((a, b) => (b.cost || 0) - (a.cost || 0));
+      case 'cost-low':
+        return sorted.sort((a, b) => (a.cost || 0) - (b.cost || 0));
+      case 'time':
+      default:
+        return sorted; // Already sorted by time from API
+    }
+  }, [events, sortBy]);
 
   useEffect(() => {
     if (!id) return;
@@ -127,7 +143,7 @@ export function SessionDetail() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-6 gap-4">
             <div>
               <p className="text-xs text-muted-foreground uppercase tracking-wide">Started</p>
               <p className="text-sm font-medium mt-1">{formatDateTime(session.startedAt)}</p>
@@ -145,6 +161,18 @@ export function SessionDetail() {
               </p>
             </div>
             <div>
+              <p className="text-xs text-muted-foreground uppercase tracking-wide">Cache Read</p>
+              <p className="text-sm font-medium font-mono text-cyan-500 mt-1">
+                {formatTokens(session.totalCacheReadTokens || 0)}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground uppercase tracking-wide">Cache Write</p>
+              <p className="text-sm font-medium font-mono text-orange-500 mt-1">
+                {formatTokens(session.totalCacheWriteTokens || 0)}
+              </p>
+            </div>
+            <div>
               <p className="text-xs text-muted-foreground uppercase tracking-wide">Cost</p>
               <p className="text-sm font-medium font-mono text-green-500 mt-1">
                 {formatCost(session.totalCostUsd)}
@@ -158,12 +186,49 @@ export function SessionDetail() {
       <div>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold">Events</h3>
-          <Badge variant="outline">{events.length} events</Badge>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Sort by:</span>
+              <div className="flex rounded-md border overflow-hidden">
+                <button
+                  onClick={() => setSortBy('time')}
+                  className={`px-3 py-1 text-xs transition-colors ${
+                    sortBy === 'time'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-background hover:bg-muted'
+                  }`}
+                >
+                  Time
+                </button>
+                <button
+                  onClick={() => setSortBy('cost-high')}
+                  className={`px-3 py-1 text-xs border-l transition-colors ${
+                    sortBy === 'cost-high'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-background hover:bg-muted'
+                  }`}
+                >
+                  Cost ↓
+                </button>
+                <button
+                  onClick={() => setSortBy('cost-low')}
+                  className={`px-3 py-1 text-xs border-l transition-colors ${
+                    sortBy === 'cost-low'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-background hover:bg-muted'
+                  }`}
+                >
+                  Cost ↑
+                </button>
+              </div>
+            </div>
+            <Badge variant="outline">{events.length} events</Badge>
+          </div>
         </div>
 
         <ScrollArea className="h-[calc(100vh-400px)]">
           <div className="space-y-2 pr-4">
-            {events.map((event) => {
+            {sortedEvents.map((event) => {
               const isExpanded = expandedEvents.has(event.id);
               const label = getEntryTypeLabel(event.entryType, event.hookEventName, event.toolName, event.content);
               const variant = getEventBadgeVariant(event.hookEventName, event.entryType, event.content);
@@ -201,6 +266,22 @@ export function SessionDetail() {
                             {truncate(event.content, 60)}
                           </span>
                         )}
+                        {event.cost !== undefined && event.cost > 0 && session.totalCostUsd > 0 && (
+                          <div className="flex items-center gap-1 ml-auto">
+                            <div
+                              className="w-12 h-1.5 bg-muted rounded-full overflow-hidden"
+                              title={`${formatCost(event.cost)} (${((event.cost / session.totalCostUsd) * 100).toFixed(1)}%)`}
+                            >
+                              <div
+                                className="h-full bg-green-500 rounded-full"
+                                style={{ width: `${Math.min((event.cost / session.totalCostUsd) * 100, 100)}%` }}
+                              />
+                            </div>
+                            <span className="text-xs text-green-500 font-mono w-10 text-right">
+                              {((event.cost / session.totalCostUsd) * 100).toFixed(0)}%
+                            </span>
+                          </div>
+                        )}
                         <svg
                           className={`w-4 h-4 text-muted-foreground transition-transform ${isExpanded ? 'rotate-180' : ''}`}
                           fill="none"
@@ -219,17 +300,37 @@ export function SessionDetail() {
                             {event.content}
                           </pre>
                           {event.tokensInput !== undefined && (
-                            <div className="mt-3 flex items-center gap-4 text-xs text-muted-foreground">
-                              <span>Tokens: {event.tokensInput} in / {event.tokensOutput || 0} out</span>
-                              {event.cost !== undefined && event.cost > 0 && (
-                                <span className="text-green-500 font-mono">
-                                  {formatCost(event.cost)}
-                                </span>
-                              )}
-                              {event.model && (
-                                <Badge variant="outline" className="text-xs">
-                                  {event.model.replace('claude-', '')}
-                                </Badge>
+                            <div className="mt-3 space-y-2">
+                              <div className="flex items-center gap-4 text-xs text-muted-foreground flex-wrap">
+                                <span>Input: <span className="font-mono text-foreground">{formatTokens(event.tokensInput)}</span></span>
+                                <span>Output: <span className="font-mono text-foreground">{formatTokens(event.tokensOutput || 0)}</span></span>
+                                {event.cacheReadTokens !== undefined && event.cacheReadTokens > 0 && (
+                                  <span className="text-cyan-500">Cache Read: <span className="font-mono">{formatTokens(event.cacheReadTokens)}</span></span>
+                                )}
+                                {event.cacheWriteTokens !== undefined && event.cacheWriteTokens > 0 && (
+                                  <span className="text-orange-500">Cache Write: <span className="font-mono">{formatTokens(event.cacheWriteTokens)}</span></span>
+                                )}
+                                {event.model && (
+                                  <Badge variant="outline" className="text-xs">
+                                    {event.model.replace('claude-', '')}
+                                  </Badge>
+                                )}
+                              </div>
+                              {event.cost !== undefined && event.cost > 0 && session.totalCostUsd > 0 && (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-green-500 font-mono text-xs">
+                                    {formatCost(event.cost)}
+                                  </span>
+                                  <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+                                    <div
+                                      className="h-full bg-gradient-to-r from-green-500 to-emerald-400 rounded-full transition-all"
+                                      style={{ width: `${Math.min((event.cost / session.totalCostUsd) * 100, 100)}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-xs text-muted-foreground font-mono w-12 text-right">
+                                    {((event.cost / session.totalCostUsd) * 100).toFixed(1)}%
+                                  </span>
+                                </div>
                               )}
                             </div>
                           )}

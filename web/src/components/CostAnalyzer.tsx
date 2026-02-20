@@ -31,10 +31,84 @@ const COLORS = [
   '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1',
 ];
 
+// Tool category helpers
+const FILE_TOOLS = ['Read', 'Write', 'Edit', 'Grep', 'Glob', 'NotebookEdit'];
+const TASK_TOOLS = ['Task', 'TaskOutput', 'TaskUpdate', 'TaskCreate', 'TaskStop', 'TaskList', 'TodoWrite', 'KillShell', 'Skill', 'EnterPlanMode', 'ExitPlanMode'];
+const SHELL_TOOLS = ['Bash'];
+const WEB_TOOLS = ['WebFetch', 'WebSearch'];
+const OTHER_BUILTIN = ['AskUserQuestion'];
+
+function categorizeTools(byTool: { toolName: string; totalCost: number; count: number; avgCost: number; totalTokens: number }[]) {
+  const mcpTools: typeof byTool = [];
+  const fileTools: typeof byTool = [];
+  const taskTools: typeof byTool = [];
+  const shellTools: typeof byTool = [];
+  const webTools: typeof byTool = [];
+  const textCategories: typeof byTool = [];
+  const otherTools: typeof byTool = [];
+
+  for (const tool of byTool) {
+    if (tool.toolName.startsWith('Text:')) {
+      textCategories.push(tool);
+    } else if (tool.toolName.startsWith('mcp__')) {
+      mcpTools.push(tool);
+    } else if (FILE_TOOLS.includes(tool.toolName)) {
+      fileTools.push(tool);
+    } else if (TASK_TOOLS.includes(tool.toolName)) {
+      taskTools.push(tool);
+    } else if (SHELL_TOOLS.includes(tool.toolName)) {
+      shellTools.push(tool);
+    } else if (WEB_TOOLS.includes(tool.toolName)) {
+      webTools.push(tool);
+    } else {
+      otherTools.push(tool);
+    }
+  }
+
+  return { mcpTools, fileTools, taskTools, shellTools, webTools, textCategories, otherTools };
+}
+
+function sumCategory(tools: { totalCost: number; count: number; totalTokens: number }[]) {
+  return tools.reduce(
+    (acc, t) => ({
+      cost: acc.cost + t.totalCost,
+      count: acc.count + t.count,
+      tokens: acc.tokens + t.totalTokens,
+    }),
+    { cost: 0, count: 0, tokens: 0 }
+  );
+}
+
 export function CostAnalyzer() {
   const [analysis, setAnalysis] = useState<CostAnalysis | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
+  const [hiddenSegments, setHiddenSegments] = useState<Set<string>>(new Set());
+
+  const toggleCategory = (category: string) => {
+    setExpandedCategories(prev => {
+      const next = new Set(prev);
+      if (next.has(category)) {
+        next.delete(category);
+      } else {
+        next.add(category);
+      }
+      return next;
+    });
+  };
+
+  const toggleSegment = (name: string) => {
+    setHiddenSegments(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) {
+        next.delete(name);
+      } else {
+        next.add(name);
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     getCostAnalysis()
@@ -75,19 +149,42 @@ export function CostAnalyzer() {
 
   const { byTool, byModel, byEntryType, expensiveEvents, textResponsePatterns, contentLengthCost, summary } = analysis;
 
-  // Prepare pie chart data for tools
-  const toolPieData = byTool.slice(0, 8).map((t, i) => ({
-    name: t.toolName.replace('mcp__', '').slice(0, 20),
-    value: t.totalCost,
-    color: COLORS[i % COLORS.length],
-  }));
+  // Categorize tools
+  const { mcpTools, fileTools, taskTools, shellTools, webTools, textCategories, otherTools } = categorizeTools(byTool);
+  const mcpTotals = sumCategory(mcpTools);
+  const fileTotals = sumCategory(fileTools);
+  const taskTotals = sumCategory(taskTools);
+  const shellTotals = sumCategory(shellTools);
+  const webTotals = sumCategory(webTools);
+  const textTotals = sumCategory(textCategories);
+
+  // Prepare grouped pie chart data
+  const groupedPieData = [
+    ...(fileTotals.cost > 0 ? [{ name: 'File Tools', value: fileTotals.cost, color: '#22c55e', category: 'file' }] : []),
+    ...(taskTotals.cost > 0 ? [{ name: 'Task/Agent Tools', value: taskTotals.cost, color: '#f59e0b', category: 'task' }] : []),
+    ...(shellTotals.cost > 0 ? [{ name: 'Shell (Bash)', value: shellTotals.cost, color: '#ef4444', category: 'shell' }] : []),
+    ...(webTotals.cost > 0 ? [{ name: 'Web Tools', value: webTotals.cost, color: '#06b6d4', category: 'web' }] : []),
+    ...(mcpTotals.cost > 0 ? [{ name: 'MCP Tools', value: mcpTotals.cost, color: '#8b5cf6', category: 'mcp' }] : []),
+    ...(textTotals.cost > 0 ? [{ name: 'Text Responses', value: textTotals.cost, color: '#3b82f6', category: 'text' }] : []),
+    ...otherTools.map((t, i) => ({
+      name: t.toolName.slice(0, 20),
+      value: t.totalCost,
+      color: COLORS[(i + 6) % COLORS.length],
+      category: 'other',
+    })),
+  ].sort((a, b) => b.value - a.value);
+
+  // Filter out hidden segments for pie chart
+  const visiblePieData = groupedPieData.filter(d => !hiddenSegments.has(d.name));
 
   // Prepare bar chart data for models
-  const modelBarData = byModel.map((m) => ({
-    name: m.model.replace('claude-', '').slice(0, 15),
-    cost: m.totalCost,
-    count: m.count,
-  }));
+  const modelBarData = byModel
+    .filter(m => !hiddenSegments.has(m.model))
+    .map((m) => ({
+      name: m.model.replace('claude-', '').slice(0, 15),
+      cost: m.totalCost,
+      count: m.count,
+    }));
 
   return (
     <div className="space-y-6">
@@ -155,18 +252,18 @@ export function CostAnalyzer() {
 
       {/* Charts Row */}
       <div className="grid grid-cols-2 gap-4">
-        {/* Cost by Tool - Pie Chart */}
+        {/* Cost by Category - Pie Chart */}
         <Card>
           <CardHeader>
-            <CardTitle>Cost by Tool</CardTitle>
-            <CardDescription>Which tools are consuming the most budget</CardDescription>
+            <CardTitle>Cost by Category</CardTitle>
+            <CardDescription>Click legend items to show/hide segments</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="h-72 flex">
               <ResponsiveContainer width="60%" height="100%">
                 <PieChart>
                   <Pie
-                    data={toolPieData}
+                    data={visiblePieData}
                     cx="50%"
                     cy="50%"
                     innerRadius={60}
@@ -174,7 +271,7 @@ export function CostAnalyzer() {
                     paddingAngle={2}
                     dataKey="value"
                   >
-                    {toolPieData.map((entry, index) => (
+                    {visiblePieData.map((entry, index) => (
                       <Cell key={`cell-${index}`} fill={entry.color} />
                     ))}
                   </Pie>
@@ -188,17 +285,36 @@ export function CostAnalyzer() {
                   />
                 </PieChart>
               </ResponsiveContainer>
-              <div className="flex-1 flex flex-col justify-center gap-1">
-                {toolPieData.map((entry, i) => (
-                  <div key={i} className="flex items-center gap-2 text-xs">
+              <div className="flex-1 flex flex-col justify-center gap-1 overflow-y-auto max-h-72">
+                {groupedPieData.map((entry, i) => {
+                  const isHidden = hiddenSegments.has(entry.name);
+                  return (
                     <div
-                      className="w-3 h-3 rounded"
-                      style={{ backgroundColor: entry.color }}
-                    />
-                    <span className="truncate flex-1">{entry.name}</span>
-                    <span className="text-muted-foreground">{formatCost(entry.value)}</span>
-                  </div>
-                ))}
+                      key={i}
+                      className={`flex items-center gap-2 text-xs cursor-pointer hover:bg-muted/50 px-1 py-0.5 rounded transition-all ${
+                        isHidden ? 'opacity-40' : ''
+                      }`}
+                      onClick={() => toggleSegment(entry.name)}
+                    >
+                      <div
+                        className={`w-3 h-3 rounded ${isHidden ? 'bg-muted' : ''}`}
+                        style={{ backgroundColor: isHidden ? undefined : entry.color }}
+                      />
+                      <span className={`truncate flex-1 ${isHidden ? 'line-through' : ''}`}>
+                        {entry.name}
+                      </span>
+                      <span className="text-muted-foreground">{formatCost(entry.value)}</span>
+                    </div>
+                  );
+                })}
+                {hiddenSegments.size > 0 && (
+                  <button
+                    className="text-xs text-blue-400 hover:text-blue-300 mt-2"
+                    onClick={() => setHiddenSegments(new Set())}
+                  >
+                    Show all
+                  </button>
+                )}
               </div>
             </div>
           </CardContent>
@@ -208,10 +324,28 @@ export function CostAnalyzer() {
         <Card>
           <CardHeader>
             <CardTitle>Cost by Model</CardTitle>
-            <CardDescription>Spending across different Claude models</CardDescription>
+            <CardDescription>Click model names to show/hide</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="h-72">
+            <div className="flex gap-2 mb-3 flex-wrap">
+              {byModel.map((m, i) => {
+                const isHidden = hiddenSegments.has(m.model);
+                return (
+                  <button
+                    key={i}
+                    className={`text-xs px-2 py-1 rounded border transition-all ${
+                      isHidden
+                        ? 'opacity-40 bg-muted border-muted line-through'
+                        : 'bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/20'
+                    }`}
+                    onClick={() => toggleSegment(m.model)}
+                  >
+                    {m.model.replace('claude-', '').slice(0, 15)}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={modelBarData} layout="vertical">
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
@@ -266,32 +400,234 @@ export function CostAnalyzer() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {byTool.map((tool, i) => (
-                <TableRow key={i}>
-                  <TableCell className="font-medium">
-                    <div className="flex items-center gap-2">
-                      <div
-                        className="w-2 h-2 rounded-full"
-                        style={{ backgroundColor: COLORS[i % COLORS.length] }}
-                      />
-                      {tool.toolName.replace('mcp__', '')}
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-right font-mono text-green-500">
-                    {formatCost(tool.totalCost)}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <Badge variant="outline">
-                      {((tool.totalCost / summary.totalCost) * 100).toFixed(1)}%
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-right">{tool.count.toLocaleString()}</TableCell>
-                  <TableCell className="text-right font-mono">
-                    {formatCost(tool.avgCost)}
-                  </TableCell>
-                  <TableCell className="text-right">{formatTokens(tool.totalTokens)}</TableCell>
-                </TableRow>
-              ))}
+              {(() => {
+                type RowType = 'category-parent' | 'category-child' | 'other';
+                type CategoryKey = 'mcp' | 'file' | 'task' | 'shell' | 'web' | 'text';
+
+                const categoryConfig: Record<CategoryKey, { name: string; color: string }> = {
+                  file: { name: 'File Tools', color: '#22c55e' },
+                  task: { name: 'Task/Agent Tools', color: '#f59e0b' },
+                  shell: { name: 'Shell (Bash)', color: '#ef4444' },
+                  web: { name: 'Web Tools', color: '#06b6d4' },
+                  mcp: { name: 'MCP Tools', color: '#8b5cf6' },
+                  text: { name: 'Text Responses', color: '#3b82f6' },
+                };
+
+                // Build rows with categories
+                const rows: { type: RowType; category?: CategoryKey; data: typeof byTool[0]; children?: typeof byTool }[] = [];
+
+                // Add File Tools parent if exists
+                if (fileTools.length > 0) {
+                  rows.push({
+                    type: 'category-parent',
+                    category: 'file',
+                    data: {
+                      toolName: 'File Tools',
+                      totalCost: fileTotals.cost,
+                      count: fileTotals.count,
+                      avgCost: fileTotals.cost / fileTotals.count,
+                      totalTokens: fileTotals.tokens,
+                    },
+                    children: fileTools,
+                  });
+                }
+
+                // Add Task/Agent Tools parent if exists
+                if (taskTools.length > 0) {
+                  rows.push({
+                    type: 'category-parent',
+                    category: 'task',
+                    data: {
+                      toolName: 'Task/Agent Tools',
+                      totalCost: taskTotals.cost,
+                      count: taskTotals.count,
+                      avgCost: taskTotals.cost / taskTotals.count,
+                      totalTokens: taskTotals.tokens,
+                    },
+                    children: taskTools,
+                  });
+                }
+
+                // Add Shell parent if exists
+                if (shellTools.length > 0) {
+                  rows.push({
+                    type: 'category-parent',
+                    category: 'shell',
+                    data: {
+                      toolName: 'Shell (Bash)',
+                      totalCost: shellTotals.cost,
+                      count: shellTotals.count,
+                      avgCost: shellTotals.cost / shellTotals.count,
+                      totalTokens: shellTotals.tokens,
+                    },
+                    children: shellTools,
+                  });
+                }
+
+                // Add Web Tools parent if exists
+                if (webTools.length > 0) {
+                  rows.push({
+                    type: 'category-parent',
+                    category: 'web',
+                    data: {
+                      toolName: 'Web Tools',
+                      totalCost: webTotals.cost,
+                      count: webTotals.count,
+                      avgCost: webTotals.cost / webTotals.count,
+                      totalTokens: webTotals.tokens,
+                    },
+                    children: webTools,
+                  });
+                }
+
+                // Add MCP parent if exists
+                if (mcpTools.length > 0) {
+                  rows.push({
+                    type: 'category-parent',
+                    category: 'mcp',
+                    data: {
+                      toolName: 'MCP Tools',
+                      totalCost: mcpTotals.cost,
+                      count: mcpTotals.count,
+                      avgCost: mcpTotals.cost / mcpTotals.count,
+                      totalTokens: mcpTotals.tokens,
+                    },
+                    children: mcpTools,
+                  });
+                }
+
+                // Add Text parent if exists
+                if (textCategories.length > 0) {
+                  rows.push({
+                    type: 'category-parent',
+                    category: 'text',
+                    data: {
+                      toolName: 'Text Responses',
+                      totalCost: textTotals.cost,
+                      count: textTotals.count,
+                      avgCost: textTotals.cost / textTotals.count,
+                      totalTokens: textTotals.tokens,
+                    },
+                    children: textCategories,
+                  });
+                }
+
+                // Add other tools
+                otherTools.forEach(tool => {
+                  rows.push({ type: 'other', data: tool });
+                });
+
+                // Sort by cost
+                rows.sort((a, b) => b.data.totalCost - a.data.totalCost);
+
+                // Flatten with children
+                const flatRows: { type: RowType; category?: CategoryKey; data: typeof byTool[0]; isChild?: boolean; parentCategory?: CategoryKey }[] = [];
+                for (const row of rows) {
+                  flatRows.push(row);
+                  if (row.type === 'category-parent' && row.category && expandedCategories.has(row.category) && row.children) {
+                    const sortedChildren = [...row.children].sort((a, b) => b.totalCost - a.totalCost);
+                    for (const child of sortedChildren) {
+                      flatRows.push({ type: 'category-child', data: child, isChild: true, parentCategory: row.category });
+                    }
+                  }
+                }
+
+                return flatRows.map((row, i) => {
+                  if (row.type === 'category-parent' && row.category) {
+                    const config = categoryConfig[row.category];
+                    const isExpanded = expandedCategories.has(row.category);
+                    return (
+                      <TableRow
+                        key={`${row.category}-parent`}
+                        className={`cursor-pointer hover:opacity-80`}
+                        style={{ backgroundColor: `${config.color}15` }}
+                        onClick={() => toggleCategory(row.category!)}
+                      >
+                        <TableCell className="font-medium">
+                          <div className="flex items-center gap-2">
+                            <svg
+                              className={`w-4 h-4 transition-transform`}
+                              style={{ color: config.color }}
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d={isExpanded ? "M19 9l-7 7-7-7" : "M9 5l7 7-7 7"}
+                              />
+                            </svg>
+                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: config.color }} />
+                            <span className="font-semibold" style={{ color: config.color }}>{row.data.toolName}</span>
+                            <Badge variant="secondary" className="text-xs ml-2">
+                              {row.children?.length} tools
+                            </Badge>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-green-500 font-semibold">
+                          {formatCost(row.data.totalCost)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Badge variant="outline" style={{ backgroundColor: `${config.color}20` }}>
+                            {((row.data.totalCost / summary.totalCost) * 100).toFixed(1)}%
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right font-semibold">{row.data.count.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono">{formatCost(row.data.avgCost)}</TableCell>
+                        <TableCell className="text-right">{formatTokens(row.data.totalTokens)}</TableCell>
+                      </TableRow>
+                    );
+                  }
+
+                  if (row.type === 'category-child' && row.parentCategory) {
+                    const config = categoryConfig[row.parentCategory];
+                    return (
+                      <TableRow key={`${row.parentCategory}-${i}`} style={{ backgroundColor: `${config.color}08` }}>
+                        <TableCell className="font-medium pl-10">
+                          <div className="flex items-center gap-2">
+                            <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: config.color, opacity: 0.6 }} />
+                            <span className="text-sm opacity-80">
+                              {row.data.toolName.replace('mcp__', '').replace('Text: ', '')}
+                            </span>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-green-500/80 text-sm">
+                          {formatCost(row.data.totalCost)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <span className="text-xs text-muted-foreground">
+                            {((row.data.totalCost / summary.totalCost) * 100).toFixed(1)}%
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right text-sm">{row.data.count.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-sm">{formatCost(row.data.avgCost)}</TableCell>
+                        <TableCell className="text-right text-sm">{formatTokens(row.data.totalTokens)}</TableCell>
+                      </TableRow>
+                    );
+                  }
+
+                  // Other tools (not in any category)
+                  return (
+                    <TableRow key={i}>
+                      <TableCell className="font-medium">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
+                          {row.data.toolName}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-green-500">{formatCost(row.data.totalCost)}</TableCell>
+                      <TableCell className="text-right">
+                        <Badge variant="outline">{((row.data.totalCost / summary.totalCost) * 100).toFixed(1)}%</Badge>
+                      </TableCell>
+                      <TableCell className="text-right">{row.data.count.toLocaleString()}</TableCell>
+                      <TableCell className="text-right font-mono">{formatCost(row.data.avgCost)}</TableCell>
+                      <TableCell className="text-right">{formatTokens(row.data.totalTokens)}</TableCell>
+                    </TableRow>
+                  );
+                });
+              })()}
             </TableBody>
           </Table>
         </CardContent>

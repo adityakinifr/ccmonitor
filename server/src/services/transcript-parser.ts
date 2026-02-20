@@ -180,6 +180,8 @@ export class TranscriptParser {
       id: sessionId,
       total_input_tokens: tokens.totalInput,
       total_output_tokens: tokens.output,
+      total_cache_read_tokens: tokens.cacheRead,
+      total_cache_write_tokens: tokens.cacheWrite,
       total_cost_usd: cost,
     });
 
@@ -194,6 +196,8 @@ export class TranscriptParser {
       content: textContent.slice(0, 5000),
       tokens_input: tokens.totalInput,
       tokens_output: tokens.output,
+      cache_read_tokens: tokens.cacheRead,
+      cache_write_tokens: tokens.cacheWrite,
       cost,
       model,
       timestamp: entry.timestamp,
