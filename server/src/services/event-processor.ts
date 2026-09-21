@@ -36,6 +36,8 @@ export class EventProcessor {
       content,
       tokens_input: null,
       tokens_output: null,
+      cache_read_tokens: null,
+      cache_write_tokens: null,
       model: null,
       timestamp: event.timestamp,
       uuid: null,

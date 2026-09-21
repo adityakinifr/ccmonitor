@@ -8,6 +8,8 @@ import { CostTracker } from '@/components/CostTracker';
 import { CostAnalyzer } from '@/components/CostAnalyzer';
 import { ProjectAnalysis } from '@/components/ProjectAnalysis';
 import { AIOptimizer } from '@/components/AIOptimizer';
+import { Tasks } from '@/components/Tasks';
+import { AdaptivePatterns } from '@/components/AdaptivePatterns';
 
 function App() {
   return (
@@ -15,6 +17,8 @@ function App() {
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<ActivityStream />} />
+          <Route path="tasks" element={<Tasks />} />
+          <Route path="adaptive" element={<AdaptivePatterns />} />
           <Route path="sessions" element={<SessionList />} />
           <Route path="sessions/:id" element={<SessionDetail />} />
           <Route path="mcp" element={<McpStats />} />

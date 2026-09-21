@@ -8,6 +8,8 @@ import { useTheme } from '@/hooks/useTheme';
 
 const navItems = [
   { path: '/', label: 'Activity', icon: 'activity' },
+  { path: '/tasks', label: 'Tasks', icon: 'tasks' },
+  { path: '/adaptive', label: 'Adaptive', icon: 'brain' },
   { path: '/sessions', label: 'Sessions', icon: 'terminal' },
   { path: '/projects', label: 'Projects', icon: 'folder' },
   { path: '/mcp', label: 'MCP Tools', icon: 'plug' },
@@ -22,6 +24,12 @@ function NavIcon({ type }: { type: string }) {
       return (
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+        </svg>
+      );
+    case 'tasks':
+      return (
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
         </svg>
       );
     case 'terminal':
@@ -52,6 +60,12 @@ function NavIcon({ type }: { type: string }) {
       return (
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+        </svg>
+      );
+    case 'brain':
+      return (
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 2a10 10 0 1 0 10 10M12 12l4-4M16 8h-4v4" />
         </svg>
       );
     case 'folder':

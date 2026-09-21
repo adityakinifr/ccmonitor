@@ -1,4 +1,4 @@
-import type { SessionSummary, EventItem, McpToolStats, CostSummary, Stats, SessionDetail } from '@/types';
+import type { SessionSummary, EventItem, McpToolStats, CostSummary, Stats, SessionDetail, TaskItem } from '@/types';
 
 const API_BASE = '/api';
 
@@ -272,4 +272,327 @@ export async function getProjectCosts(projectPath: string, days = 30): Promise<{
   tools: ProjectToolBreakdown[];
 }> {
   return fetchJson(`/stats/projects/costs?projectPath=${encodeURIComponent(projectPath)}&days=${days}`);
+}
+
+// Tasks API
+export async function getTasks(): Promise<TaskItem[]> {
+  const data = await fetchJson<{ tasks: TaskItem[] }>('/tasks');
+  return data.tasks;
+}
+
+export async function createManualTask(title: string): Promise<TaskItem> {
+  const response = await fetch(`${API_BASE}/tasks/manual`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function updateTask(
+  id: string,
+  updates: {
+    autopilot?: boolean;
+    adaptiveMode?: boolean;
+    tier?: 'routine' | 'important' | 'urgent';
+    title?: string;
+    status?: 'queued' | 'working' | 'done';
+  }
+): Promise<TaskItem> {
+  const response = await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function deleteTask(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+}
+
+// Adaptive Mode API
+import type { ApprovalPattern, AdaptiveStats } from '@/types';
+
+export async function getAdaptivePatterns(projectPath?: string): Promise<{
+  patterns: ApprovalPattern[];
+  globalPatterns: ApprovalPattern[];
+}> {
+  const url = projectPath
+    ? `/adaptive/patterns?projectPath=${encodeURIComponent(projectPath)}`
+    : '/adaptive/patterns';
+  return fetchJson(url);
+}
+
+export async function deleteAdaptivePattern(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE}/adaptive/patterns/${id}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+}
+
+export async function importGlobalPatterns(projectPath: string, threshold = 3): Promise<{
+  success: boolean;
+  imported: number;
+  message?: string;
+}> {
+  const response = await fetch(`${API_BASE}/adaptive/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath, threshold }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function getAdaptiveStats(): Promise<AdaptiveStats> {
+  return fetchJson('/adaptive/stats');
+}
+
+export async function getAdaptiveHealth(): Promise<{
+  available: boolean;
+  modelLoaded: boolean;
+  error?: string;
+}> {
+  return fetchJson('/adaptive/health');
+}
+
+export async function backfillAdaptivePatterns(projectPath: string, limit = 100): Promise<{
+  success: boolean;
+  processed: number;
+  message: string;
+}> {
+  const response = await fetch(`${API_BASE}/adaptive/backfill`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath, limit }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function voteOnPattern(id: number, vote: 'agree' | 'disagree'): Promise<void> {
+  const response = await fetch(`${API_BASE}/adaptive/patterns/${id}/vote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ vote }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+}
+
+import type { SessionDecisions } from '@/types';
+
+export async function getSessionDecisions(sessionId: string, limit = 50): Promise<SessionDecisions> {
+  return fetchJson(`/adaptive/decisions/${encodeURIComponent(sessionId)}?limit=${limit}`);
+}
+
+export async function getProjectPatternCount(projectPath: string): Promise<{ count: number; projectPath: string }> {
+  return fetchJson(`/adaptive/pattern-count?projectPath=${encodeURIComponent(projectPath)}`);
+}
+
+export async function promotePatternToGlobal(id: number): Promise<{ success: boolean; message: string; globalPatternId?: number }> {
+  const response = await fetch(`${API_BASE}/adaptive/patterns/${id}/promote`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+// Rules API
+import type { ApprovalRule, RecentToolCall } from '@/types';
+
+export async function getApprovalRules(projectPath?: string): Promise<{
+  rules: ApprovalRule[];
+  globalRules: ApprovalRule[];
+}> {
+  const url = projectPath
+    ? `/adaptive/rules?projectPath=${encodeURIComponent(projectPath)}`
+    : '/adaptive/rules';
+  return fetchJson(url);
+}
+
+export async function createApprovalRule(data: {
+  projectPath: string | null;
+  toolName: string;
+  pattern: string;
+  patternType: 'exact' | 'prefix' | 'glob' | 'directory' | 'contains';
+  ruleType: 'allow' | 'deny';
+  description?: string;
+}): Promise<{ success: boolean; id: number }> {
+  const response = await fetch(`${API_BASE}/adaptive/rules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function deleteApprovalRule(id: number): Promise<{ success: boolean }> {
+  const response = await fetch(`${API_BASE}/adaptive/rules/${id}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function promoteRuleToGlobal(id: number): Promise<{ success: boolean; globalRuleId: number }> {
+  const response = await fetch(`${API_BASE}/adaptive/rules/${id}/promote`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function getRecentToolCalls(projectPath: string, limit = 50): Promise<{ toolCalls: RecentToolCall[] }> {
+  return fetchJson(`/adaptive/tool-calls?projectPath=${encodeURIComponent(projectPath)}&limit=${limit}`);
+}
+
+// WhatsApp API
+import type { WhatsAppStatus, WhatsAppPendingApproval, WhatsAppConfig } from '@/types';
+
+export async function getWhatsAppStatus(): Promise<WhatsAppStatus> {
+  return fetchJson('/whatsapp/status');
+}
+
+export async function initWhatsApp(): Promise<{ success: boolean; message?: string; error?: string }> {
+  const response = await fetch(`${API_BASE}/whatsapp/init`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function updateWhatsAppConfig(config: Partial<WhatsAppConfig>): Promise<{
+  success: boolean;
+  config: WhatsAppConfig;
+}> {
+  const response = await fetch(`${API_BASE}/whatsapp/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function getWhatsAppPending(): Promise<{ pending: WhatsAppPendingApproval[] }> {
+  return fetchJson('/whatsapp/pending');
+}
+
+export async function resolveWhatsAppApproval(id: string, decision: 'allow' | 'deny'): Promise<{ success: boolean; message?: string }> {
+  const response = await fetch(`${API_BASE}/whatsapp/pending/${id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+// WhatsApp Business API
+import type { WhatsAppBusinessStatus, WhatsAppBusinessSetup, WhatsAppPendingApproval } from '@/types';
+
+export async function getWhatsAppBusinessStatus(): Promise<WhatsAppBusinessStatus> {
+  return fetchJson('/whatsapp-business/status');
+}
+
+export async function updateWhatsAppBusinessConfig(config: {
+  enabled?: boolean;
+  accessToken?: string;
+  phoneNumberId?: string;
+  targetNumber?: string;
+  timeoutMs?: number;
+}): Promise<{ success: boolean; status: WhatsAppBusinessStatus }> {
+  const response = await fetch(`${API_BASE}/whatsapp-business/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function getWhatsAppBusinessPending(): Promise<{ pending: WhatsAppPendingApproval[] }> {
+  return fetchJson('/whatsapp-business/pending');
+}
+
+export async function resolveWhatsAppBusinessApproval(id: string, decision: 'allow' | 'deny'): Promise<{ success: boolean; message?: string }> {
+  const response = await fetch(`${API_BASE}/whatsapp-business/pending/${id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+export async function getWhatsAppBusinessSetup(): Promise<WhatsAppBusinessSetup> {
+  return fetchJson('/whatsapp-business/setup');
 }

@@ -7,9 +7,14 @@ import { Repository } from './db/repository.js';
 import { registerEventsRoutes } from './routes/events.js';
 import { registerSessionsRoutes } from './routes/sessions.js';
 import { registerStatsRoutes } from './routes/stats.js';
+import { registerTasksRoutes } from './routes/tasks.js';
+import { registerAdaptiveRoutes } from './routes/adaptive.js';
+import { registerWhatsAppRoutes } from './routes/whatsapp.js';
+import { registerWhatsAppBusinessRoutes } from './routes/whatsapp-business.js';
 import { wsBroadcaster } from './services/websocket.js';
 import { TranscriptParser } from './services/transcript-parser.js';
 import { TranscriptWatcher } from './services/transcript-watcher.js';
+import { whatsappService } from './services/whatsapp.js';
 
 async function main() {
   // Initialize database
@@ -48,6 +53,10 @@ async function main() {
   registerEventsRoutes(app, repo);
   registerSessionsRoutes(app, repo);
   registerStatsRoutes(app, repo);
+  registerTasksRoutes(app, repo);
+  registerAdaptiveRoutes(app, repo);
+  registerWhatsAppRoutes(app);
+  registerWhatsAppBusinessRoutes(app);
 
   // Start transcript watcher
   const parser = new TranscriptParser(repo);
@@ -58,6 +67,7 @@ async function main() {
   const shutdown = async () => {
     console.log('\n[Server] Shutting down...');
     watcher.stop();
+    await whatsappService.destroy();
     await app.close();
     db.close();
     process.exit(0);

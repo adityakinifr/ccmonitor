@@ -36,7 +36,6 @@ const FILE_TOOLS = ['Read', 'Write', 'Edit', 'Grep', 'Glob', 'NotebookEdit'];
 const TASK_TOOLS = ['Task', 'TaskOutput', 'TaskUpdate', 'TaskCreate', 'TaskStop', 'TaskList', 'TodoWrite', 'KillShell', 'Skill', 'EnterPlanMode', 'ExitPlanMode'];
 const SHELL_TOOLS = ['Bash'];
 const WEB_TOOLS = ['WebFetch', 'WebSearch'];
-const OTHER_BUILTIN = ['AskUserQuestion'];
 
 function categorizeTools(byTool: { toolName: string; totalCost: number; count: number; avgCost: number; totalTokens: number }[]) {
   const mcpTools: typeof byTool = [];
@@ -521,7 +520,7 @@ export function CostAnalyzer() {
                 rows.sort((a, b) => b.data.totalCost - a.data.totalCost);
 
                 // Flatten with children
-                const flatRows: { type: RowType; category?: CategoryKey; data: typeof byTool[0]; isChild?: boolean; parentCategory?: CategoryKey }[] = [];
+                const flatRows: { type: RowType; category?: CategoryKey; data: typeof byTool[0]; isChild?: boolean; parentCategory?: CategoryKey; children?: typeof byTool }[] = [];
                 for (const row of rows) {
                   flatRows.push(row);
                   if (row.type === 'category-parent' && row.category && expandedCategories.has(row.category) && row.children) {

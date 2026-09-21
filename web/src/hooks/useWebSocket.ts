@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
-import type { WsMessage, EventItem, Stats } from '@/types';
+import type { WsMessage, EventItem, Stats, TaskItem } from '@/types';
 import { useEventStore } from '@/stores/eventStore';
+import { useTaskStore } from '@/stores/taskStore';
 
 const WS_URL = `ws://${window.location.hostname}:3456/ws`;
 const RECONNECT_DELAY = 3000;
@@ -9,6 +10,7 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const { addEvent, setStats, setConnected } = useEventStore();
+  const { addTask, updateTask, deleteTask } = useTaskStore();
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -38,6 +40,15 @@ export function useWebSocket() {
           case 'session_end':
             // Could trigger session list refresh
             break;
+          case 'task_created':
+            addTask(message.payload as TaskItem);
+            break;
+          case 'task_updated':
+            updateTask(message.payload as TaskItem);
+            break;
+          case 'task_deleted':
+            deleteTask((message.payload as { id: string }).id);
+            break;
         }
       } catch (error) {
         console.error('[WS] Error parsing message:', error);
@@ -60,7 +71,7 @@ export function useWebSocket() {
     };
 
     wsRef.current = ws;
-  }, [addEvent, setStats, setConnected]);
+  }, [addEvent, setStats, setConnected, addTask, updateTask, deleteTask]);
 
   useEffect(() => {
     connect();

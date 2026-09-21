@@ -195,8 +195,93 @@ export interface Stats {
   mcpToolsUsed: number;
 }
 
+// Task types (Executive functionality)
+export interface Task {
+  id: string;
+  session_id: string | null;
+  title: string;
+  tier: 'routine' | 'important' | 'urgent';
+  status: 'queued' | 'working' | 'done';
+  autopilot: boolean;
+  adaptive_mode: boolean;
+  machine: string | null;
+  cwd: string | null;
+  manual: boolean;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface TaskItem {
+  id: string;
+  sessionId: string | null;
+  title: string;
+  tier: 'routine' | 'important' | 'urgent';
+  status: 'queued' | 'working' | 'done';
+  autopilot: boolean;
+  adaptiveMode: boolean;
+  machine: string | null;
+  cwd: string | null;
+  manual: boolean;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+// Adaptive mode types
+export interface ApprovalEmbedding {
+  id: number;
+  project_path: string | null;
+  tool_name: string;
+  tool_input_text: string;
+  embedding: Buffer;
+  approval_count: number;
+  denial_count: number;
+  last_approved_at: string | null;
+  last_denied_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApprovalEmbeddingItem {
+  id: number;
+  projectPath: string | null;
+  toolName: string;
+  toolInputText: string;
+  approvalCount: number;
+  denialCount: number;
+  lastApprovedAt: string | null;
+  lastDeniedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ApprovalDecision {
+  id: number;
+  session_id: string;
+  task_id: string | null;
+  project_path: string | null;
+  tool_name: string;
+  tool_input_text: string | null;
+  decision: 'approved' | 'denied' | 'auto_approved';
+  decision_source: 'user' | 'adaptive' | 'autopilot' | 'dangerous';
+  similarity_score: number | null;
+  matched_embedding_id: number | null;
+  created_at: string;
+}
+
+export interface AdaptiveCheckResult {
+  decision: 'allow' | 'deny' | 'ask';
+  reason: string;
+  matchedPattern?: {
+    id: number;
+    similarity: number;
+    text: string;
+  };
+  isDangerous?: boolean;
+  dangerReason?: string;
+}
+
 // WebSocket message types
 export interface WsMessage {
-  type: 'event' | 'session_start' | 'session_end' | 'stats_update';
-  payload: EventItem | SessionSummary | McpToolStats[] | Stats;
+  type: 'event' | 'session_start' | 'session_end' | 'stats_update' | 'task_created' | 'task_updated' | 'task_deleted';
+  payload: EventItem | SessionSummary | McpToolStats[] | Stats | TaskItem | { id: string };
 }

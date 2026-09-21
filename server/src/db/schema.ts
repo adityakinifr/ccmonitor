@@ -69,6 +69,70 @@ export function initializeDatabase(dbPath: string): Database.Database {
       last_read_at TEXT
     );
 
+    -- Tasks table (Executive functionality)
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      session_id TEXT,
+      title TEXT NOT NULL,
+      tier TEXT CHECK(tier IN ('routine', 'important', 'urgent')) DEFAULT 'routine',
+      status TEXT CHECK(status IN ('queued', 'working', 'done')) DEFAULT 'working',
+      autopilot INTEGER DEFAULT 0,
+      adaptive_mode INTEGER DEFAULT 0,
+      machine TEXT,
+      cwd TEXT,
+      manual INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL,
+      completed_at TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+
+    -- Approval embeddings for adaptive mode
+    CREATE TABLE IF NOT EXISTS approval_embeddings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT,
+      tool_name TEXT NOT NULL,
+      tool_input_text TEXT NOT NULL,
+      embedding BLOB NOT NULL,
+      approval_count INTEGER DEFAULT 0,
+      denial_count INTEGER DEFAULT 0,
+      last_approved_at TEXT,
+      last_denied_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    -- Approval decisions audit trail
+    CREATE TABLE IF NOT EXISTS approval_decisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      task_id TEXT,
+      project_path TEXT,
+      tool_name TEXT NOT NULL,
+      tool_input_text TEXT,
+      decision TEXT NOT NULL CHECK(decision IN ('approved', 'denied', 'auto_approved')),
+      decision_source TEXT NOT NULL CHECK(decision_source IN ('user', 'adaptive', 'autopilot', 'dangerous', 'rule')),
+      similarity_score REAL,
+      matched_embedding_id INTEGER,
+      matched_rule_id INTEGER,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id)
+    );
+
+    -- Approval rules (user-defined signatures)
+    CREATE TABLE IF NOT EXISTS approval_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT,
+      tool_name TEXT NOT NULL,
+      pattern TEXT NOT NULL,
+      pattern_type TEXT NOT NULL CHECK(pattern_type IN ('exact', 'prefix', 'glob', 'directory', 'contains')),
+      rule_type TEXT NOT NULL CHECK(rule_type IN ('allow', 'deny')),
+      description TEXT,
+      match_count INTEGER DEFAULT 0,
+      last_matched_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
     CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
@@ -76,6 +140,14 @@ export function initializeDatabase(dbPath: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
     CREATE INDEX IF NOT EXISTS idx_mcp_tools_name ON mcp_tools(tool_name);
     CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
+    CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
+    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_approval_embeddings_project ON approval_embeddings(project_path);
+    CREATE INDEX IF NOT EXISTS idx_approval_embeddings_tool ON approval_embeddings(tool_name);
+    CREATE INDEX IF NOT EXISTS idx_approval_decisions_session ON approval_decisions(session_id);
+    CREATE INDEX IF NOT EXISTS idx_approval_decisions_project ON approval_decisions(project_path);
+    CREATE INDEX IF NOT EXISTS idx_approval_rules_project ON approval_rules(project_path);
+    CREATE INDEX IF NOT EXISTS idx_approval_rules_tool ON approval_rules(tool_name);
   `);
 
   // Clean up any existing duplicate events BEFORE creating unique index
@@ -210,6 +282,15 @@ export function initializeDatabase(dbPath: string): Database.Database {
       ), 0)
     WHERE total_cache_read_tokens = 0 OR total_cache_read_tokens IS NULL
   `);
+
+  // Add adaptive_mode column to tasks if it doesn't exist (migration)
+  const taskColumns = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+  const taskColumnNames = taskColumns.map(c => c.name);
+
+  if (!taskColumnNames.includes('adaptive_mode')) {
+    console.log('[DB] Adding adaptive_mode column to tasks...');
+    db.exec('ALTER TABLE tasks ADD COLUMN adaptive_mode INTEGER DEFAULT 0');
+  }
 
   return db;
 }

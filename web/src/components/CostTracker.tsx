@@ -120,7 +120,6 @@ export function CostTracker() {
   });
 
   const totalCost = costs.reduce((sum, c) => sum + c.costUsd, 0);
-  const totalTokens = costs.reduce((sum, c) => sum + c.inputTokens + c.outputTokens, 0);
   const totalCacheSavings = costs.reduce((sum, c) => sum + (c.cacheSavings || 0), 0);
   const totalCacheReadTokens = costs.reduce((sum, c) => sum + (c.cacheReadTokens || 0), 0);
   const totalCacheWriteTokens = costs.reduce((sum, c) => sum + (c.cacheWriteTokens || 0), 0);

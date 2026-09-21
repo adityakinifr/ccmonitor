@@ -9,6 +9,8 @@ import type {
   CostSummary,
   Stats,
   HookEvent,
+  Task,
+  TaskItem,
 } from '../types/index.js';
 
 export class Repository {
@@ -982,6 +984,128 @@ export class Repository {
     }));
   }
 
+  // Tasks (Executive functionality)
+  private taskToItem(task: Task): TaskItem {
+    return {
+      id: task.id,
+      sessionId: task.session_id,
+      title: task.title,
+      tier: task.tier,
+      status: task.status,
+      autopilot: !!task.autopilot,
+      adaptiveMode: !!task.adaptive_mode,
+      machine: task.machine,
+      cwd: task.cwd,
+      manual: !!task.manual,
+      createdAt: task.created_at,
+      completedAt: task.completed_at,
+    };
+  }
+
+  getTasks(): TaskItem[] {
+    const rows = this.db
+      .prepare('SELECT * FROM tasks ORDER BY status ASC, tier DESC, created_at DESC')
+      .all() as Task[];
+    return rows.map((row) => this.taskToItem(row));
+  }
+
+  getTask(id: string): TaskItem | undefined {
+    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task | undefined;
+    return row ? this.taskToItem(row) : undefined;
+  }
+
+  getTaskBySessionId(sessionId: string): TaskItem | undefined {
+    const row = this.db.prepare('SELECT * FROM tasks WHERE session_id = ?').get(sessionId) as Task | undefined;
+    return row ? this.taskToItem(row) : undefined;
+  }
+
+  createTask(task: Omit<Task, 'autopilot' | 'manual' | 'adaptive_mode'> & { autopilot?: boolean; manual?: boolean; adaptive_mode?: boolean }): TaskItem {
+    this.db
+      .prepare(
+        `INSERT INTO tasks (id, session_id, title, tier, status, autopilot, adaptive_mode, machine, cwd, manual, created_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        task.id,
+        task.session_id,
+        task.title,
+        task.tier || 'routine',
+        task.status || 'working',
+        task.autopilot ? 1 : 0,
+        task.adaptive_mode ? 1 : 0,
+        task.machine,
+        task.cwd,
+        task.manual ? 1 : 0,
+        task.created_at,
+        task.completed_at
+      );
+    return this.getTask(task.id)!;
+  }
+
+  updateTask(id: string, updates: Partial<Pick<Task, 'title' | 'tier' | 'status' | 'autopilot' | 'adaptive_mode' | 'completed_at'>>): TaskItem | undefined {
+    const task = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task | undefined;
+    if (!task) return undefined;
+
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    if (updates.title !== undefined) {
+      fields.push('title = ?');
+      values.push(updates.title);
+    }
+    if (updates.tier !== undefined) {
+      fields.push('tier = ?');
+      values.push(updates.tier);
+    }
+    if (updates.status !== undefined) {
+      fields.push('status = ?');
+      values.push(updates.status);
+    }
+    if (updates.autopilot !== undefined) {
+      fields.push('autopilot = ?');
+      values.push(updates.autopilot ? 1 : 0);
+    }
+    if (updates.adaptive_mode !== undefined) {
+      fields.push('adaptive_mode = ?');
+      values.push(updates.adaptive_mode ? 1 : 0);
+    }
+    if (updates.completed_at !== undefined) {
+      fields.push('completed_at = ?');
+      values.push(updates.completed_at);
+    }
+
+    if (fields.length > 0) {
+      values.push(id);
+      this.db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    }
+
+    return this.getTask(id);
+  }
+
+  deleteTask(id: string): boolean {
+    const result = this.db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  completeTask(id: string): TaskItem | undefined {
+    return this.updateTask(id, {
+      status: 'done',
+      completed_at: new Date().toISOString(),
+    });
+  }
+
+  resumeTask(id: string): TaskItem | undefined {
+    return this.updateTask(id, {
+      status: 'working',
+      completed_at: null,
+    });
+  }
+
+  checkAutopilot(id: string): boolean {
+    const task = this.db.prepare('SELECT autopilot FROM tasks WHERE id = ?').get(id) as { autopilot: number } | undefined;
+    return task ? !!task.autopilot : false;
+  }
+
   // Project Analysis
   getProjectStats(): {
     projectPath: string;
@@ -1108,5 +1232,554 @@ export class Repository {
       totalCost: r.total_cost || 0,
       count: r.count,
     }));
+  }
+
+  // Adaptive mode methods
+  checkAdaptiveMode(taskId: string): boolean {
+    const task = this.db.prepare('SELECT adaptive_mode FROM tasks WHERE id = ?').get(taskId) as { adaptive_mode: number } | undefined;
+    return task ? !!task.adaptive_mode : false;
+  }
+
+  getApprovalEmbeddings(projectPath: string | null, toolName?: string): {
+    id: number;
+    projectPath: string | null;
+    toolName: string;
+    toolInputText: string;
+    embedding: Buffer;
+    approvalCount: number;
+    denialCount: number;
+    lastApprovedAt: string | null;
+    lastDeniedAt: string | null;
+  }[] {
+    let query = 'SELECT * FROM approval_embeddings WHERE ';
+    const params: unknown[] = [];
+
+    if (projectPath === null) {
+      query += 'project_path IS NULL';
+    } else {
+      query += 'project_path = ?';
+      params.push(projectPath);
+    }
+
+    if (toolName) {
+      query += ' AND tool_name = ?';
+      params.push(toolName);
+    }
+
+    const rows = this.db.prepare(query).all(...params) as {
+      id: number;
+      project_path: string | null;
+      tool_name: string;
+      tool_input_text: string;
+      embedding: Buffer;
+      approval_count: number;
+      denial_count: number;
+      last_approved_at: string | null;
+      last_denied_at: string | null;
+    }[];
+
+    return rows.map(r => ({
+      id: r.id,
+      projectPath: r.project_path,
+      toolName: r.tool_name,
+      toolInputText: r.tool_input_text,
+      embedding: r.embedding,
+      approvalCount: r.approval_count,
+      denialCount: r.denial_count,
+      lastApprovedAt: r.last_approved_at,
+      lastDeniedAt: r.last_denied_at,
+    }));
+  }
+
+  getApprovalEmbeddingById(id: number): {
+    id: number;
+    projectPath: string | null;
+    toolName: string;
+    toolInputText: string;
+    embedding: Buffer;
+    approvalCount: number;
+    denialCount: number;
+  } | null {
+    const row = this.db.prepare(
+      'SELECT * FROM approval_embeddings WHERE id = ?'
+    ).get(id) as {
+      id: number;
+      project_path: string | null;
+      tool_name: string;
+      tool_input_text: string;
+      embedding: Buffer;
+      approval_count: number;
+      denial_count: number;
+    } | undefined;
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      projectPath: row.project_path,
+      toolName: row.tool_name,
+      toolInputText: row.tool_input_text,
+      embedding: row.embedding,
+      approvalCount: row.approval_count,
+      denialCount: row.denial_count,
+    };
+  }
+
+  createApprovalEmbedding(data: {
+    projectPath: string | null;
+    toolName: string;
+    toolInputText: string;
+    embedding: Buffer;
+  }): number {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(
+      `INSERT INTO approval_embeddings (project_path, tool_name, tool_input_text, embedding, approval_count, denial_count, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 0, 0, ?, ?)`
+    ).run(data.projectPath, data.toolName, data.toolInputText, data.embedding, now, now);
+    return result.lastInsertRowid as number;
+  }
+
+  updateApprovalEmbedding(id: number, approved: boolean): void {
+    const now = new Date().toISOString();
+    if (approved) {
+      this.db.prepare(
+        `UPDATE approval_embeddings SET approval_count = approval_count + 1, last_approved_at = ?, updated_at = ? WHERE id = ?`
+      ).run(now, now, id);
+    } else {
+      this.db.prepare(
+        `UPDATE approval_embeddings SET denial_count = denial_count + 1, last_denied_at = ?, updated_at = ? WHERE id = ?`
+      ).run(now, now, id);
+    }
+  }
+
+  deleteApprovalEmbedding(id: number): boolean {
+    const result = this.db.prepare('DELETE FROM approval_embeddings WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  recordApprovalDecision(data: {
+    sessionId: string;
+    taskId: string | null;
+    projectPath: string | null;
+    toolName: string;
+    toolInputText: string | null;
+    decision: 'approved' | 'denied' | 'auto_approved';
+    decisionSource: 'user' | 'adaptive' | 'autopilot' | 'dangerous';
+    similarityScore: number | null;
+    matchedEmbeddingId: number | null;
+  }): void {
+    this.db.prepare(
+      `INSERT INTO approval_decisions (session_id, task_id, project_path, tool_name, tool_input_text, decision, decision_source, similarity_score, matched_embedding_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      data.sessionId,
+      data.taskId,
+      data.projectPath,
+      data.toolName,
+      data.toolInputText,
+      data.decision,
+      data.decisionSource,
+      data.similarityScore,
+      data.matchedEmbeddingId,
+      new Date().toISOString()
+    );
+  }
+
+  getApprovalDecisions(projectPath: string | null, limit = 50): {
+    id: number;
+    sessionId: string;
+    taskId: string | null;
+    toolName: string;
+    decision: string;
+    decisionSource: string;
+    similarityScore: number | null;
+    createdAt: string;
+  }[] {
+    let query = 'SELECT * FROM approval_decisions WHERE ';
+    const params: unknown[] = [];
+
+    if (projectPath === null) {
+      query += 'project_path IS NULL';
+    } else {
+      query += 'project_path = ?';
+      params.push(projectPath);
+    }
+
+    query += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(limit);
+
+    const rows = this.db.prepare(query).all(...params) as {
+      id: number;
+      session_id: string;
+      task_id: string | null;
+      tool_name: string;
+      decision: string;
+      decision_source: string;
+      similarity_score: number | null;
+      created_at: string;
+    }[];
+
+    return rows.map(r => ({
+      id: r.id,
+      sessionId: r.session_id,
+      taskId: r.task_id,
+      toolName: r.tool_name,
+      decision: r.decision,
+      decisionSource: r.decision_source,
+      similarityScore: r.similarity_score,
+      createdAt: r.created_at,
+    }));
+  }
+
+  hasProjectPatterns(projectPath: string): boolean {
+    const result = this.db.prepare(
+      'SELECT COUNT(*) as count FROM approval_embeddings WHERE project_path = ?'
+    ).get(projectPath) as { count: number };
+    return result.count > 0;
+  }
+
+  getGlobalPatternCount(): number {
+    const result = this.db.prepare(
+      'SELECT COUNT(*) as count FROM approval_embeddings WHERE project_path IS NULL'
+    ).get() as { count: number };
+    return result.count;
+  }
+
+  copyGlobalPatternsToProject(projectPath: string, minApprovals = 3): number {
+    // Copy global patterns with high approval counts to a new project
+    const result = this.db.prepare(
+      `INSERT INTO approval_embeddings (project_path, tool_name, tool_input_text, embedding, approval_count, denial_count, created_at, updated_at)
+       SELECT ?, tool_name, tool_input_text, embedding, 0, 0, datetime('now'), datetime('now')
+       FROM approval_embeddings
+       WHERE project_path IS NULL
+         AND approval_count >= ?
+         AND denial_count = 0`
+    ).run(projectPath, minApprovals);
+    return result.changes;
+  }
+
+  getRecentToolCalls(projectPath: string, limit = 100): {
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    timestamp: string;
+  }[] {
+    // Match by session project_path OR by cwd in raw_data JSON
+    // This handles both transcript events (project_path on session) and hook events (cwd in raw_data)
+    const rows = this.db.prepare(
+      `SELECT e.tool_name, e.tool_input, e.timestamp
+       FROM events e
+       LEFT JOIN sessions s ON e.session_id = s.id
+       WHERE (
+         s.project_path = ?
+         OR s.project_path LIKE ?
+         OR json_extract(e.raw_data, '$.cwd') = ?
+         OR json_extract(e.raw_data, '$.cwd') LIKE ?
+       )
+         AND e.tool_name IS NOT NULL
+         AND e.tool_input IS NOT NULL
+         AND e.tool_name NOT IN ('Read', 'Glob', 'Grep')
+       ORDER BY e.timestamp DESC
+       LIMIT ?`
+    ).all(projectPath, `%${projectPath}%`, projectPath, `%${projectPath}%`, limit) as { tool_name: string; tool_input: string; timestamp: string }[];
+
+    return rows.map(r => {
+      let toolInput: Record<string, unknown> = {};
+      try {
+        toolInput = JSON.parse(r.tool_input);
+      } catch {
+        // Invalid JSON
+      }
+      return {
+        toolName: r.tool_name,
+        toolInput,
+        timestamp: r.timestamp,
+      };
+    });
+  }
+
+  getProjectPatternCount(projectPath: string): number {
+    const row = this.db.prepare(
+      'SELECT COUNT(*) as count FROM approval_embeddings WHERE project_path = ?'
+    ).get(projectPath) as { count: number };
+    return row?.count || 0;
+  }
+
+  getDecisionsBySession(sessionId: string, limit = 50): {
+    id: number;
+    toolName: string;
+    toolInputText: string | null;
+    decision: string;
+    decisionSource: string;
+    similarityScore: number | null;
+    createdAt: string;
+  }[] {
+    const rows = this.db.prepare(
+      `SELECT id, tool_name, tool_input_text, decision, decision_source, similarity_score, created_at
+       FROM approval_decisions
+       WHERE session_id = ?
+       ORDER BY created_at DESC
+       LIMIT ?`
+    ).all(sessionId, limit) as {
+      id: number;
+      tool_name: string;
+      tool_input_text: string | null;
+      decision: string;
+      decision_source: string;
+      similarity_score: number | null;
+      created_at: string;
+    }[];
+
+    return rows.map(r => ({
+      id: r.id,
+      toolName: r.tool_name,
+      toolInputText: r.tool_input_text,
+      decision: r.decision,
+      decisionSource: r.decision_source,
+      similarityScore: r.similarity_score,
+      createdAt: r.created_at,
+    }));
+  }
+
+  getDecisionCountsBySession(sessionId: string): {
+    approved: number;
+    denied: number;
+    autoApproved: number;
+  } {
+    const row = this.db.prepare(
+      `SELECT
+         SUM(CASE WHEN decision = 'approved' THEN 1 ELSE 0 END) as approved,
+         SUM(CASE WHEN decision = 'denied' THEN 1 ELSE 0 END) as denied,
+         SUM(CASE WHEN decision = 'auto_approved' THEN 1 ELSE 0 END) as auto_approved
+       FROM approval_decisions
+       WHERE session_id = ?`
+    ).get(sessionId) as { approved: number; denied: number; auto_approved: number } | undefined;
+
+    return {
+      approved: row?.approved || 0,
+      denied: row?.denied || 0,
+      autoApproved: row?.auto_approved || 0,
+    };
+  }
+
+  // Approval Rules
+  getApprovalRules(projectPath: string | null, toolName?: string): {
+    id: number;
+    projectPath: string | null;
+    toolName: string;
+    pattern: string;
+    patternType: string;
+    ruleType: string;
+    description: string | null;
+    matchCount: number;
+    lastMatchedAt: string | null;
+    createdAt: string;
+  }[] {
+    let query = 'SELECT * FROM approval_rules WHERE ';
+    const params: unknown[] = [];
+
+    if (projectPath === null) {
+      query += 'project_path IS NULL';
+    } else {
+      query += 'project_path = ?';
+      params.push(projectPath);
+    }
+
+    if (toolName) {
+      query += ' AND tool_name = ?';
+      params.push(toolName);
+    }
+
+    query += ' ORDER BY created_at DESC';
+
+    const rows = this.db.prepare(query).all(...params) as {
+      id: number;
+      project_path: string | null;
+      tool_name: string;
+      pattern: string;
+      pattern_type: string;
+      rule_type: string;
+      description: string | null;
+      match_count: number;
+      last_matched_at: string | null;
+      created_at: string;
+    }[];
+
+    return rows.map(r => ({
+      id: r.id,
+      projectPath: r.project_path,
+      toolName: r.tool_name,
+      pattern: r.pattern,
+      patternType: r.pattern_type,
+      ruleType: r.rule_type,
+      description: r.description,
+      matchCount: r.match_count,
+      lastMatchedAt: r.last_matched_at,
+      createdAt: r.created_at,
+    }));
+  }
+
+  getAllApprovalRulesForProject(projectPath: string): {
+    id: number;
+    projectPath: string | null;
+    toolName: string;
+    pattern: string;
+    patternType: string;
+    ruleType: string;
+    matchCount: number;
+  }[] {
+    // Get both project-specific and global rules
+    const rows = this.db.prepare(
+      `SELECT * FROM approval_rules
+       WHERE project_path = ? OR project_path IS NULL
+       ORDER BY project_path DESC, created_at DESC`
+    ).all(projectPath) as {
+      id: number;
+      project_path: string | null;
+      tool_name: string;
+      pattern: string;
+      pattern_type: string;
+      rule_type: string;
+      match_count: number;
+    }[];
+
+    return rows.map(r => ({
+      id: r.id,
+      projectPath: r.project_path,
+      toolName: r.tool_name,
+      pattern: r.pattern,
+      patternType: r.pattern_type,
+      ruleType: r.rule_type,
+      matchCount: r.match_count,
+    }));
+  }
+
+  createApprovalRule(data: {
+    projectPath: string | null;
+    toolName: string;
+    pattern: string;
+    patternType: 'exact' | 'prefix' | 'glob' | 'directory' | 'contains';
+    ruleType: 'allow' | 'deny';
+    description?: string;
+  }): number {
+    const now = new Date().toISOString();
+    const result = this.db.prepare(
+      `INSERT INTO approval_rules (project_path, tool_name, pattern, pattern_type, rule_type, description, match_count, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
+    ).run(
+      data.projectPath,
+      data.toolName,
+      data.pattern,
+      data.patternType,
+      data.ruleType,
+      data.description || null,
+      now,
+      now
+    );
+    return result.lastInsertRowid as number;
+  }
+
+  updateRuleMatchCount(id: number): void {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `UPDATE approval_rules SET match_count = match_count + 1, last_matched_at = ?, updated_at = ? WHERE id = ?`
+    ).run(now, now, id);
+  }
+
+  deleteApprovalRule(id: number): boolean {
+    const result = this.db.prepare('DELETE FROM approval_rules WHERE id = ?').run(id);
+    return result.changes > 0;
+  }
+
+  promoteRuleToGlobal(id: number): number | null {
+    const rule = this.db.prepare('SELECT * FROM approval_rules WHERE id = ?').get(id) as {
+      tool_name: string;
+      pattern: string;
+      pattern_type: string;
+      rule_type: string;
+      description: string | null;
+    } | undefined;
+
+    if (!rule) return null;
+
+    // Check if similar global rule exists
+    const existing = this.db.prepare(
+      `SELECT id FROM approval_rules
+       WHERE project_path IS NULL AND tool_name = ? AND pattern = ?`
+    ).get(rule.tool_name, rule.pattern) as { id: number } | undefined;
+
+    if (existing) return existing.id;
+
+    // Create new global rule
+    const now = new Date().toISOString();
+    const result = this.db.prepare(
+      `INSERT INTO approval_rules (project_path, tool_name, pattern, pattern_type, rule_type, description, match_count, created_at, updated_at)
+       VALUES (NULL, ?, ?, ?, ?, ?, 0, ?, ?)`
+    ).run(rule.tool_name, rule.pattern, rule.pattern_type, rule.rule_type, rule.description, now, now);
+
+    return result.lastInsertRowid as number;
+  }
+
+  // Get recent tool calls for rule creation
+  getRecentToolCallsForRules(projectPath: string, limit = 50): {
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    count: number;
+    lastUsed: string;
+  }[] {
+    // Get unique tool calls grouped by tool_name and normalized input
+    const rows = this.db.prepare(
+      `SELECT
+         e.tool_name,
+         e.tool_input,
+         COUNT(*) as count,
+         MAX(e.timestamp) as last_used
+       FROM events e
+       LEFT JOIN sessions s ON e.session_id = s.id
+       WHERE e.tool_name IS NOT NULL
+         AND e.tool_input IS NOT NULL
+         AND e.tool_name IN ('Bash', 'Write', 'Edit', 'NotebookEdit')
+         AND (
+           s.project_path = ?
+           OR s.project_path LIKE ?
+           OR json_extract(e.raw_data, '$.cwd') = ?
+           OR json_extract(e.raw_data, '$.cwd') LIKE ?
+         )
+       GROUP BY e.tool_name, e.tool_input
+       ORDER BY count DESC, last_used DESC
+       LIMIT ?`
+    ).all(projectPath, `%${projectPath}%`, projectPath, `%${projectPath}%`, limit) as {
+      tool_name: string;
+      tool_input: string;
+      count: number;
+      last_used: string;
+    }[];
+
+    return rows.map(r => {
+      let toolInput: Record<string, unknown> = {};
+      try {
+        toolInput = JSON.parse(r.tool_input);
+      } catch {
+        // Invalid JSON
+      }
+      return {
+        toolName: r.tool_name,
+        toolInput,
+        count: r.count,
+        lastUsed: r.last_used,
+      };
+    });
+  }
+
+  getRuleCount(projectPath: string | null): number {
+    if (projectPath === null) {
+      const row = this.db.prepare(
+        'SELECT COUNT(*) as count FROM approval_rules WHERE project_path IS NULL'
+      ).get() as { count: number };
+      return row?.count || 0;
+    }
+    const row = this.db.prepare(
+      'SELECT COUNT(*) as count FROM approval_rules WHERE project_path = ?'
+    ).get(projectPath) as { count: number };
+    return row?.count || 0;
   }
 }

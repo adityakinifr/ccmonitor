@@ -6,3 +6,9 @@ dist/
 .env
 .env.local
 .DS_Store
+
+# caches and local data
+.fastembed_cache/
+.wwebjs_cache/
+server/data/
+*.db-shm

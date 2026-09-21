@@ -1,6 +1,6 @@
 import type { WebSocket } from 'ws';
 import type { SocketStream } from '@fastify/websocket';
-import type { WsMessage, EventItem, SessionSummary, Stats } from '../types/index.js';
+import type { WsMessage, EventItem, SessionSummary, Stats, TaskItem } from '../types/index.js';
 
 class WebSocketBroadcaster {
   private clients: Set<WebSocket> = new Set();
@@ -56,6 +56,18 @@ class WebSocketBroadcaster {
 
   broadcastStats(stats: Stats): void {
     this.broadcast({ type: 'stats_update', payload: stats });
+  }
+
+  broadcastTaskCreated(task: TaskItem): void {
+    this.broadcast({ type: 'task_created', payload: task });
+  }
+
+  broadcastTaskUpdated(task: TaskItem): void {
+    this.broadcast({ type: 'task_updated', payload: task });
+  }
+
+  broadcastTaskDeleted(taskId: string): void {
+    this.broadcast({ type: 'task_deleted', payload: { id: taskId } });
   }
 
   getClientCount(): number {

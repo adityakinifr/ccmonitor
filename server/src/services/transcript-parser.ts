@@ -117,6 +117,8 @@ export class TranscriptParser {
       content: content.slice(0, 5000),
       tokens_input: null,
       tokens_output: null,
+      cache_read_tokens: null,
+      cache_write_tokens: null,
       model: null,
       timestamp: entry.timestamp,
       uuid: entry.uuid,

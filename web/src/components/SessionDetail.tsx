@@ -262,8 +262,11 @@ export function SessionDetail() {
                           </code>
                         )}
                         {event.content && (
-                          <span className="text-sm text-muted-foreground truncate flex-1">
-                            {truncate(event.content, 60)}
+                          <span
+                            className="text-sm text-muted-foreground truncate flex-1 font-mono"
+                            title={event.content}
+                          >
+                            {truncate(event.content, 100)}
                           </span>
                         )}
                         {event.cost !== undefined && event.cost > 0 && session.totalCostUsd > 0 && (
