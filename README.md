@@ -59,6 +59,26 @@ npm run web      # Frontend on http://localhost:5173
 npm run build
 ```
 
+### Start at login (optional, macOS)
+
+Collection does not depend on this -- the Claude Code hooks are installed
+separately and keep recording either way. This only decides whether the server
+and dashboard come up on their own, so the dashboard is there when you want it
+and hook events aren't dropped while nothing is listening.
+
+```bash
+npm run install-autostart     # register a launchd agent for the current user
+npm run autostart-status      # is it installed and loaded?
+npm run uninstall-autostart   # undo
+```
+
+Logs go to `~/Library/Logs/ccmonitor.log`. The agent restarts ccmonitor if it
+crashes, but respects a deliberate stop.
+
+The node interpreter is resolved at install time and written into the agent, so
+re-run `install-autostart` after changing node versions (nvm paths are
+version-specific) or after moving this checkout.
+
 ## Usage
 
 1. Start the development server: `npm run dev`
