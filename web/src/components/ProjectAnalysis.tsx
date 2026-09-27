@@ -167,7 +167,11 @@ export function ProjectAnalysis() {
           </CardHeader>
           <CardContent>
             <div className="h-72 flex">
-              <ResponsiveContainer width="60%" height="100%">
+              {/* ResponsiveContainer measures its parent, so it needs a sized
+                  box: as a bare flex item with a % width it collapsed to 0
+                  and the pie rendered nothing beside the legend. */}
+              <div className="w-3/5 h-full">
+              <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
                     data={pieData}
@@ -192,6 +196,7 @@ export function ProjectAnalysis() {
                   />
                 </PieChart>
               </ResponsiveContainer>
+              </div>
               <div className="flex-1 flex flex-col justify-center gap-1">
                 {pieData.map((entry, i) => (
                   <div key={i} className="flex items-center gap-2 text-xs">

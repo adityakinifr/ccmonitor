@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { getPricing } from '../services/token-calculator.js';
 import type {
   Session,
   Event,
@@ -9,8 +10,6 @@ import type {
   CostSummary,
   Stats,
   HookEvent,
-  Task,
-  TaskItem,
 } from '../types/index.js';
 
 export class Repository {
@@ -36,6 +35,18 @@ export class Repository {
       if (session.ended_at !== undefined) {
         updates.push('ended_at = ?');
         values.push(session.ended_at);
+      }
+      // Most transcripts open with a metadata line (mode/last-prompt/ai-title)
+      // that carries no cwd, so the row is first inserted with a null
+      // project_path. Backfill it from the first entry that does have one,
+      // otherwise the session never appears in project stats.
+      if (session.project_path) {
+        updates.push('project_path = COALESCE(NULLIF(project_path, \'\'), ?)');
+        values.push(session.project_path);
+      }
+      if (session.git_branch) {
+        updates.push('git_branch = COALESCE(NULLIF(git_branch, \'\'), ?)');
+        values.push(session.git_branch);
       }
       if (session.total_input_tokens !== undefined) {
         updates.push('total_input_tokens = total_input_tokens + ?');
@@ -126,8 +137,8 @@ export class Repository {
     const result = this.db
       .prepare(
         `
-      INSERT INTO events (session_id, event_type, hook_event_name, entry_type, tool_name, tool_input, tool_response, content, tokens_input, tokens_output, cache_read_tokens, cache_write_tokens, cost, model, timestamp, uuid, parent_uuid, raw_data)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO events (session_id, event_type, hook_event_name, entry_type, tool_name, tool_input, tool_response, content, tokens_input, tokens_output, cache_read_tokens, cache_write_tokens, cost, model, timestamp, uuid, parent_uuid, message_id, result_bytes, raw_data)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `
       )
       .run(
@@ -148,6 +159,8 @@ export class Repository {
         event.timestamp,
         event.uuid,
         event.parent_uuid,
+        event.message_id,
+        event.result_bytes,
         event.raw_data
       );
 
@@ -191,6 +204,16 @@ export class Repository {
 
   getSessionEvents(sessionId: string): EventItem[] {
     return this.getEvents(sessionId, 1000, 0);
+  }
+
+  // One Anthropic message id == one billed API response. Transcript entries are
+  // re-emitted with fresh uuids on resume/fork/subagent runs, so uuid alone lets
+  // the same response be counted many times over.
+  checkMessageExists(messageId: string): boolean {
+    const result = this.db
+      .prepare('SELECT 1 FROM events WHERE message_id = ? LIMIT 1')
+      .get(messageId);
+    return !!result;
   }
 
   checkEventExists(sessionId: string, uuid: string): boolean {
@@ -259,6 +282,56 @@ export class Repository {
     }
   }
 
+  // Tool outcomes arrive later, in a separate tool_result entry, so an
+  // invocation is recorded as pending and resolved when its result shows up.
+  // Counting at tool_use time (as this used to) makes every tool look 100%
+  // successful because the error flag only exists on the result.
+  recordToolInvocation(sessionId: string, toolName: string, toolUseId: string): void {
+    // MCP tools additionally carry aggregate stats; every tool is recorded in
+    // the pending map so its result can be attributed back to it.
+    if (toolName.startsWith('mcp__')) {
+      const serverName = toolName.split('__')[1] || null;
+      this.db
+        .prepare(
+          `INSERT INTO mcp_tools (session_id, tool_name, server_name, invocation_count, success_count, error_count, total_duration_ms, last_used_at)
+           VALUES (?, ?, ?, 1, 0, 0, 0, ?)
+           ON CONFLICT(session_id, tool_name) DO UPDATE SET
+             invocation_count = invocation_count + 1,
+             last_used_at = excluded.last_used_at`
+        )
+        .run(sessionId, toolName, serverName, new Date().toISOString());
+    }
+
+    this.db
+      .prepare(
+        `INSERT INTO mcp_tool_calls (tool_use_id, session_id, tool_name)
+         VALUES (?, ?, ?)
+         ON CONFLICT(tool_use_id) DO NOTHING`
+      )
+      .run(toolUseId, sessionId, toolName);
+  }
+
+  /** Resolves a tool_result to the tool that produced it, returning its name. */
+  resolveToolCall(toolUseId: string, success: boolean): string | null {
+    const pending = this.db
+      .prepare('SELECT session_id, tool_name FROM mcp_tool_calls WHERE tool_use_id = ?')
+      .get(toolUseId) as { session_id: string; tool_name: string } | undefined;
+    if (!pending) return null;
+
+    if (pending.tool_name.startsWith('mcp__')) {
+      this.db
+        .prepare(
+          `UPDATE mcp_tools
+           SET success_count = success_count + ?, error_count = error_count + ?
+           WHERE session_id = ? AND tool_name = ?`
+        )
+        .run(success ? 1 : 0, success ? 0 : 1, pending.session_id, pending.tool_name);
+    }
+
+    this.db.prepare('DELETE FROM mcp_tool_calls WHERE tool_use_id = ?').run(toolUseId);
+    return pending.tool_name;
+  }
+
   getMcpToolStats(): McpToolStats[] {
     const rows = this.db
       .prepare(
@@ -284,19 +357,25 @@ export class Repository {
       total_duration_ms: number;
     }[];
 
-    return rows.map((row) => ({
+    return rows.map((row) => {
+      // Rate over calls whose outcome is actually known. Dividing by
+      // invocation_count would count still-pending calls as failures, and the
+      // old code paired that denominator with a success_count incremented
+      // unconditionally -- which is why every tool read 100%.
+      const resolved = row.success_count + row.error_count;
+      return {
       toolName: row.tool_name,
       serverName: row.server_name,
       invocationCount: row.invocation_count,
-      successRate:
-        row.invocation_count > 0
-          ? (row.success_count / row.invocation_count) * 100
-          : 0,
+      resolvedCount: resolved,
+      errorCount: row.error_count,
+      successRate: resolved > 0 ? (row.success_count / resolved) * 100 : null,
       avgDurationMs:
         row.invocation_count > 0
           ? row.total_duration_ms / row.invocation_count
           : 0,
-    }));
+      };
+    });
   }
 
   // Stats
@@ -328,26 +407,36 @@ export class Repository {
     };
   }
 
-  // Uses local timezone for date grouping
+  // Grouped by the timestamp of each event, in local time.
+  //
+  // This used to group sessions by their started_at, which billed a session's
+  // entire run to the single day it began on -- a session spanning three weeks
+  // put every dollar on one bar and left the days it actually ran reading zero.
   getCostsByDay(days = 30): CostSummary[] {
     const rows = this.db
       .prepare(
         `
       SELECT
-        DATE(started_at, 'localtime') as date,
-        SUM(total_input_tokens) as input_tokens,
-        SUM(total_output_tokens) as output_tokens,
-        SUM(COALESCE(total_cache_read_tokens, 0)) as cache_read_tokens,
-        SUM(COALESCE(total_cache_write_tokens, 0)) as cache_write_tokens,
-        SUM(total_cost_usd) as cost_usd
-      FROM sessions
-      WHERE DATE(started_at, 'localtime') >= DATE('now', 'localtime', '-' || ? || ' days')
-      GROUP BY DATE(started_at, 'localtime')
-      ORDER BY date ASC
+        DATE(timestamp, 'localtime') as date,
+        COALESCE(model, '') as model,
+        SUM(COALESCE(tokens_input, 0)) as input_tokens,
+        SUM(COALESCE(tokens_output, 0)) as output_tokens,
+        SUM(COALESCE(cache_read_tokens, 0)) as cache_read_tokens,
+        SUM(COALESCE(cache_write_tokens, 0)) as cache_write_tokens,
+        SUM(COALESCE(cost, 0)) as cost_usd
+      FROM events
+      -- The raw-timestamp bound is what lets this use idx_events_timestamp;
+      -- DATE(timestamp,'localtime') alone forces a full scan. It is deliberately
+      -- a day wider than needed so the exact local-date predicate below still
+      -- decides membership -- this only narrows the rows examined.
+      WHERE timestamp >= datetime('now', '-' || (? + 1) || ' days')
+        AND DATE(timestamp, 'localtime') >= DATE('now', 'localtime', '-' || ? || ' days')
+      GROUP BY DATE(timestamp, 'localtime'), COALESCE(model, '')
     `
       )
-      .all(days) as {
+      .all(days, days) as {
       date: string;
+      model: string;
       input_tokens: number;
       output_tokens: number;
       cache_read_tokens: number;
@@ -355,10 +444,32 @@ export class Repository {
       cost_usd: number;
     }[];
 
-    // Create a map for quick lookup
-    const dataMap = new Map<string, typeof rows[0]>();
+    // Roll the per-model rows up per day, pricing each model's cache reads at
+    // its own rate rather than one blended guess.
+    const dataMap = new Map<string, Omit<CostSummary, 'date'>>();
     for (const row of rows) {
-      dataMap.set(row.date, row);
+      const p = getPricing(row.model);
+      // Without caching those reads would have been billed as fresh input.
+      const savings =
+        (row.cache_read_tokens / 1_000_000) * (p.inputPerMillion - p.cacheReadPerMillion);
+
+      const acc = dataMap.get(row.date) || {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: 0,
+        costWithoutCache: 0,
+        cacheSavings: 0,
+      };
+      acc.inputTokens += row.input_tokens;
+      acc.outputTokens += row.output_tokens;
+      acc.cacheReadTokens += row.cache_read_tokens;
+      acc.cacheWriteTokens += row.cache_write_tokens;
+      acc.costUsd += row.cost_usd;
+      acc.cacheSavings += savings;
+      acc.costWithoutCache += row.cost_usd + savings;
+      dataMap.set(row.date, acc);
     }
 
     // Fill gaps for all days in the range (using local timezone)
@@ -368,44 +479,23 @@ export class Repository {
     const startDate = new Date(endDate);
     startDate.setDate(startDate.getDate() - days + 1);
 
-    // Average input rate for calculating savings (weighted toward Sonnet as most common)
-    const AVG_INPUT_RATE = 5.0;  // $/M tokens
-    const AVG_CACHE_READ_RATE = 0.5;  // $/M tokens (10% of input)
-
     for (let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) {
-      // Format as local date (YYYY-MM-DD)
       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       const data = dataMap.get(dateStr);
-
-      if (data) {
-        // Calculate what it would have cost without caching
-        // Cache read tokens would have been charged at full input rate instead of discounted rate
-        const cacheReadSavings = (data.cache_read_tokens / 1_000_000) * (AVG_INPUT_RATE - AVG_CACHE_READ_RATE);
-        const costWithoutCache = data.cost_usd + cacheReadSavings;
-
-        result.push({
-          date: data.date,
-          inputTokens: data.input_tokens,
-          outputTokens: data.output_tokens,
-          cacheReadTokens: data.cache_read_tokens,
-          cacheWriteTokens: data.cache_write_tokens,
-          costUsd: data.cost_usd,
-          costWithoutCache,
-          cacheSavings: cacheReadSavings,
-        });
-      } else {
-        // Gap - no activity this day
-        result.push({
-          date: dateStr,
-          inputTokens: 0,
-          outputTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          costUsd: 0,
-          costWithoutCache: 0,
-          cacheSavings: 0,
-        });
-      }
+      result.push(
+        data
+          ? { date: dateStr, ...data }
+          : {
+              date: dateStr,
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              costUsd: 0,
+              costWithoutCache: 0,
+              cacheSavings: 0,
+            }
+      );
     }
 
     return result;
@@ -984,126 +1074,204 @@ export class Repository {
     }));
   }
 
-  // Tasks (Executive functionality)
-  private taskToItem(task: Task): TaskItem {
-    return {
-      id: task.id,
-      sessionId: task.session_id,
-      title: task.title,
-      tier: task.tier,
-      status: task.status,
-      autopilot: !!task.autopilot,
-      adaptiveMode: !!task.adaptive_mode,
-      machine: task.machine,
-      cwd: task.cwd,
-      manual: !!task.manual,
-      createdAt: task.created_at,
-      completedAt: task.completed_at,
+  /**
+   * Context health: what is filling the context window and what it costs.
+   *
+   * Two things drive spend on long agentic sessions -- the size of the context
+   * re-read on every turn, and the turns where the cache is rebuilt instead of
+   * read. Both are visible here alongside the tool results that inflate them.
+   *
+   * Counts only billed rows: one API response spans several transcript lines
+   * and only the first carries its usage, so the rest would otherwise show up
+   * as zero-context calls and halve the average.
+   */
+  getContextHealth(rebuildThreshold = 50_000): {
+    summary: {
+      avgContextTokens: number;
+      callsOverThreshold: number;
+      totalCalls: number;
+      rebuildCalls: number;
+      rebuildCost: number;
+      totalCost: number;
+      oversizedResults: number;
     };
-  }
+    distribution: { bucket: string; calls: number; cost: number }[];
+    rebuildsByCause: { cause: string; calls: number; cost: number }[];
+    rebuildSessions: {
+      sessionId: string;
+      projectName: string | null;
+      calls: number;
+      cost: number;
+      unexplained: number;
+    }[];
+    byTool: {
+      toolName: string;
+      results: number;
+      totalBytes: number;
+      avgBytes: number;
+      maxBytes: number;
+      oversized: number;
+    }[];
+    worstResults: {
+      id: number;
+      sessionId: string;
+      toolName: string | null;
+      bytes: number;
+      timestamp: string;
+    }[];
+  } {
+    const OVERSIZED = 200_000;
 
-  getTasks(): TaskItem[] {
-    const rows = this.db
-      .prepare('SELECT * FROM tasks ORDER BY status ASC, tier DESC, created_at DESC')
-      .all() as Task[];
-    return rows.map((row) => this.taskToItem(row));
-  }
-
-  getTask(id: string): TaskItem | undefined {
-    const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task | undefined;
-    return row ? this.taskToItem(row) : undefined;
-  }
-
-  getTaskBySessionId(sessionId: string): TaskItem | undefined {
-    const row = this.db.prepare('SELECT * FROM tasks WHERE session_id = ?').get(sessionId) as Task | undefined;
-    return row ? this.taskToItem(row) : undefined;
-  }
-
-  createTask(task: Omit<Task, 'autopilot' | 'manual' | 'adaptive_mode'> & { autopilot?: boolean; manual?: boolean; adaptive_mode?: boolean }): TaskItem {
-    this.db
+    const totals = this.db
       .prepare(
-        `INSERT INTO tasks (id, session_id, title, tier, status, autopilot, adaptive_mode, machine, cwd, manual, created_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `SELECT COUNT(*) as calls,
+                COALESCE(SUM(cache_read_tokens), 0) as ctx,
+                COALESCE(SUM(cost), 0) as cost,
+                SUM(CASE WHEN COALESCE(cache_read_tokens, 0) > 800000 THEN 1 ELSE 0 END) as over
+         FROM events WHERE entry_type = 'assistant' AND COALESCE(cost, 0) > 0`
       )
-      .run(
-        task.id,
-        task.session_id,
-        task.title,
-        task.tier || 'routine',
-        task.status || 'working',
-        task.autopilot ? 1 : 0,
-        task.adaptive_mode ? 1 : 0,
-        task.machine,
-        task.cwd,
-        task.manual ? 1 : 0,
-        task.created_at,
-        task.completed_at
-      );
-    return this.getTask(task.id)!;
-  }
+      .get() as { calls: number; ctx: number; cost: number; over: number };
 
-  updateTask(id: string, updates: Partial<Pick<Task, 'title' | 'tier' | 'status' | 'autopilot' | 'adaptive_mode' | 'completed_at'>>): TaskItem | undefined {
-    const task = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task | undefined;
-    if (!task) return undefined;
+    const distribution = this.db
+      .prepare(
+        `SELECT CASE
+                  WHEN COALESCE(cache_read_tokens,0) < 50000  THEN '<50k'
+                  WHEN COALESCE(cache_read_tokens,0) < 150000 THEN '50-150k'
+                  WHEN COALESCE(cache_read_tokens,0) < 400000 THEN '150-400k'
+                  WHEN COALESCE(cache_read_tokens,0) < 800000 THEN '400-800k'
+                  ELSE '>800k' END as bucket,
+                COUNT(*) as calls, COALESCE(SUM(cost), 0) as cost
+         FROM events WHERE entry_type = 'assistant' AND COALESCE(cost, 0) > 0
+         GROUP BY bucket`
+      )
+      .all() as { bucket: string; calls: number; cost: number }[];
+    const order = ['<50k', '50-150k', '150-400k', '400-800k', '>800k'];
+    distribution.sort((a, b) => order.indexOf(a.bucket) - order.indexOf(b.bucket));
 
-    const fields: string[] = [];
-    const values: unknown[] = [];
+    // A rebuild is a turn that wrote a large prefix to cache without reading
+    // any of it back. Classified by the gap since the previous call: beyond the
+    // 1h TTL it simply expired; inside it, the prefix was invalidated.
+    const rebuilds = this.db
+      .prepare(
+        `WITH a AS (
+           SELECT id, session_id, timestamp, COALESCE(cost, 0) as cost,
+                  LAG(timestamp) OVER (PARTITION BY session_id ORDER BY timestamp) as prev
+           FROM events WHERE entry_type = 'assistant' AND COALESCE(cost, 0) > 0
+         )
+         SELECT id, session_id, cost,
+                CASE
+                  WHEN prev IS NULL THEN 'first call in session'
+                  WHEN (julianday(timestamp) - julianday(prev)) * 1440 > 60 THEN 'cache TTL expired (idle > 1h)'
+                  ELSE 'unexplained (within cache window)' END as cause
+         FROM a
+         WHERE id IN (
+           SELECT id FROM events
+           WHERE entry_type = 'assistant' AND cache_write_tokens > ?
+             AND COALESCE(cache_read_tokens, 0) = 0 AND COALESCE(cost, 0) > 0
+         )`
+      )
+      .all(rebuildThreshold) as { id: number; session_id: string; cost: number; cause: string }[];
 
-    if (updates.title !== undefined) {
-      fields.push('title = ?');
-      values.push(updates.title);
+    const causeMap = new Map<string, { calls: number; cost: number }>();
+    const sessionMap = new Map<string, { calls: number; cost: number; unexplained: number }>();
+    for (const r of rebuilds) {
+      const c = causeMap.get(r.cause) || { calls: 0, cost: 0 };
+      c.calls++;
+      c.cost += r.cost;
+      causeMap.set(r.cause, c);
+
+      const sess = sessionMap.get(r.session_id) || { calls: 0, cost: 0, unexplained: 0 };
+      sess.calls++;
+      sess.cost += r.cost;
+      if (r.cause.startsWith('unexplained')) sess.unexplained++;
+      sessionMap.set(r.session_id, sess);
     }
-    if (updates.tier !== undefined) {
-      fields.push('tier = ?');
-      values.push(updates.tier);
-    }
-    if (updates.status !== undefined) {
-      fields.push('status = ?');
-      values.push(updates.status);
-    }
-    if (updates.autopilot !== undefined) {
-      fields.push('autopilot = ?');
-      values.push(updates.autopilot ? 1 : 0);
-    }
-    if (updates.adaptive_mode !== undefined) {
-      fields.push('adaptive_mode = ?');
-      values.push(updates.adaptive_mode ? 1 : 0);
-    }
-    if (updates.completed_at !== undefined) {
-      fields.push('completed_at = ?');
-      values.push(updates.completed_at);
-    }
 
-    if (fields.length > 0) {
-      values.push(id);
-      this.db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-    }
+    const projectOf = this.db.prepare('SELECT project_path FROM sessions WHERE id = ?');
+    const rebuildSessions = [...sessionMap.entries()]
+      .map(([sessionId, v]) => {
+        const row = projectOf.get(sessionId) as { project_path: string | null } | undefined;
+        return {
+          sessionId,
+          projectName: row?.project_path?.split('/').pop() || null,
+          ...v,
+        };
+      })
+      .sort((a, b) => b.cost - a.cost)
+      .slice(0, 15);
 
-    return this.getTask(id);
-  }
+    const byTool = this.db
+      .prepare(
+        `SELECT COALESCE(tool_name, '(unattributed)') as tool_name,
+                COUNT(*) as results,
+                COALESCE(SUM(result_bytes), 0) as total_bytes,
+                CAST(COALESCE(AVG(result_bytes), 0) AS INTEGER) as avg_bytes,
+                COALESCE(MAX(result_bytes), 0) as max_bytes,
+                SUM(CASE WHEN result_bytes > ? THEN 1 ELSE 0 END) as oversized
+         FROM events WHERE entry_type = 'tool_result' AND result_bytes IS NOT NULL
+         GROUP BY tool_name ORDER BY total_bytes DESC LIMIT 20`
+      )
+      .all(OVERSIZED) as {
+      tool_name: string;
+      results: number;
+      total_bytes: number;
+      avg_bytes: number;
+      max_bytes: number;
+      oversized: number;
+    }[];
 
-  deleteTask(id: string): boolean {
-    const result = this.db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
-    return result.changes > 0;
-  }
+    const worstResults = this.db
+      .prepare(
+        `SELECT id, session_id, tool_name, result_bytes, timestamp
+         FROM events WHERE entry_type = 'tool_result' AND result_bytes IS NOT NULL
+         ORDER BY result_bytes DESC LIMIT 15`
+      )
+      .all() as {
+      id: number;
+      session_id: string;
+      tool_name: string | null;
+      result_bytes: number;
+      timestamp: string;
+    }[];
 
-  completeTask(id: string): TaskItem | undefined {
-    return this.updateTask(id, {
-      status: 'done',
-      completed_at: new Date().toISOString(),
-    });
-  }
+    const oversized = this.db
+      .prepare(
+        `SELECT COUNT(*) as n FROM events
+         WHERE entry_type = 'tool_result' AND result_bytes > ?`
+      )
+      .get(OVERSIZED) as { n: number };
 
-  resumeTask(id: string): TaskItem | undefined {
-    return this.updateTask(id, {
-      status: 'working',
-      completed_at: null,
-    });
-  }
-
-  checkAutopilot(id: string): boolean {
-    const task = this.db.prepare('SELECT autopilot FROM tasks WHERE id = ?').get(id) as { autopilot: number } | undefined;
-    return task ? !!task.autopilot : false;
+    return {
+      summary: {
+        avgContextTokens: totals.calls > 0 ? Math.round(totals.ctx / totals.calls) : 0,
+        callsOverThreshold: totals.over,
+        totalCalls: totals.calls,
+        rebuildCalls: rebuilds.length,
+        rebuildCost: rebuilds.reduce((sum, r) => sum + r.cost, 0),
+        totalCost: totals.cost,
+        oversizedResults: oversized.n,
+      },
+      distribution,
+      rebuildsByCause: [...causeMap.entries()]
+        .map(([cause, v]) => ({ cause, ...v }))
+        .sort((a, b) => b.cost - a.cost),
+      rebuildSessions,
+      byTool: byTool.map((t) => ({
+        toolName: t.tool_name,
+        results: t.results,
+        totalBytes: t.total_bytes,
+        avgBytes: t.avg_bytes,
+        maxBytes: t.max_bytes,
+        oversized: t.oversized,
+      })),
+      worstResults: worstResults.map((r) => ({
+        id: r.id,
+        sessionId: r.session_id,
+        toolName: r.tool_name,
+        bytes: r.result_bytes,
+        timestamp: r.timestamp,
+      })),
+    };
   }
 
   // Project Analysis
@@ -1181,27 +1349,32 @@ export class Repository {
     sessions: number;
     events: number;
   }[] {
+    // Grouped by event timestamp, not session start, so a long-running session
+    // spreads across the days it actually ran. See getCostsByDay.
     const rows = this.db
       .prepare(
         `
       SELECT
-        date(s.started_at, 'localtime') as date,
-        SUM(s.total_cost_usd) as cost_usd,
-        COUNT(s.id) as sessions
-      FROM sessions s
+        date(e.timestamp, 'localtime') as date,
+        SUM(COALESCE(e.cost, 0)) as cost_usd,
+        COUNT(DISTINCT e.session_id) as sessions,
+        COUNT(*) as events
+      FROM events e
+      JOIN sessions s ON s.id = e.session_id
       WHERE s.project_path = ?
-        AND s.started_at >= date('now', 'localtime', '-' || ? || ' days')
-      GROUP BY date(s.started_at, 'localtime')
+        AND e.timestamp >= datetime('now', '-' || (? + 1) || ' days')
+        AND date(e.timestamp, 'localtime') >= date('now', 'localtime', '-' || ? || ' days')
+      GROUP BY date(e.timestamp, 'localtime')
       ORDER BY date ASC
     `
       )
-      .all(projectPath, days) as { date: string; cost_usd: number; sessions: number }[];
+      .all(projectPath, days, days) as { date: string; cost_usd: number; sessions: number; events: number }[];
 
     return rows.map((r) => ({
       date: r.date,
       costUsd: r.cost_usd || 0,
       sessions: r.sessions,
-      events: 0, // Events count removed to avoid complexity, can be added via separate query if needed
+      events: r.events,
     }));
   }
 
@@ -1232,554 +1405,5 @@ export class Repository {
       totalCost: r.total_cost || 0,
       count: r.count,
     }));
-  }
-
-  // Adaptive mode methods
-  checkAdaptiveMode(taskId: string): boolean {
-    const task = this.db.prepare('SELECT adaptive_mode FROM tasks WHERE id = ?').get(taskId) as { adaptive_mode: number } | undefined;
-    return task ? !!task.adaptive_mode : false;
-  }
-
-  getApprovalEmbeddings(projectPath: string | null, toolName?: string): {
-    id: number;
-    projectPath: string | null;
-    toolName: string;
-    toolInputText: string;
-    embedding: Buffer;
-    approvalCount: number;
-    denialCount: number;
-    lastApprovedAt: string | null;
-    lastDeniedAt: string | null;
-  }[] {
-    let query = 'SELECT * FROM approval_embeddings WHERE ';
-    const params: unknown[] = [];
-
-    if (projectPath === null) {
-      query += 'project_path IS NULL';
-    } else {
-      query += 'project_path = ?';
-      params.push(projectPath);
-    }
-
-    if (toolName) {
-      query += ' AND tool_name = ?';
-      params.push(toolName);
-    }
-
-    const rows = this.db.prepare(query).all(...params) as {
-      id: number;
-      project_path: string | null;
-      tool_name: string;
-      tool_input_text: string;
-      embedding: Buffer;
-      approval_count: number;
-      denial_count: number;
-      last_approved_at: string | null;
-      last_denied_at: string | null;
-    }[];
-
-    return rows.map(r => ({
-      id: r.id,
-      projectPath: r.project_path,
-      toolName: r.tool_name,
-      toolInputText: r.tool_input_text,
-      embedding: r.embedding,
-      approvalCount: r.approval_count,
-      denialCount: r.denial_count,
-      lastApprovedAt: r.last_approved_at,
-      lastDeniedAt: r.last_denied_at,
-    }));
-  }
-
-  getApprovalEmbeddingById(id: number): {
-    id: number;
-    projectPath: string | null;
-    toolName: string;
-    toolInputText: string;
-    embedding: Buffer;
-    approvalCount: number;
-    denialCount: number;
-  } | null {
-    const row = this.db.prepare(
-      'SELECT * FROM approval_embeddings WHERE id = ?'
-    ).get(id) as {
-      id: number;
-      project_path: string | null;
-      tool_name: string;
-      tool_input_text: string;
-      embedding: Buffer;
-      approval_count: number;
-      denial_count: number;
-    } | undefined;
-
-    if (!row) return null;
-
-    return {
-      id: row.id,
-      projectPath: row.project_path,
-      toolName: row.tool_name,
-      toolInputText: row.tool_input_text,
-      embedding: row.embedding,
-      approvalCount: row.approval_count,
-      denialCount: row.denial_count,
-    };
-  }
-
-  createApprovalEmbedding(data: {
-    projectPath: string | null;
-    toolName: string;
-    toolInputText: string;
-    embedding: Buffer;
-  }): number {
-    const now = new Date().toISOString();
-    const result = this.db.prepare(
-      `INSERT INTO approval_embeddings (project_path, tool_name, tool_input_text, embedding, approval_count, denial_count, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 0, 0, ?, ?)`
-    ).run(data.projectPath, data.toolName, data.toolInputText, data.embedding, now, now);
-    return result.lastInsertRowid as number;
-  }
-
-  updateApprovalEmbedding(id: number, approved: boolean): void {
-    const now = new Date().toISOString();
-    if (approved) {
-      this.db.prepare(
-        `UPDATE approval_embeddings SET approval_count = approval_count + 1, last_approved_at = ?, updated_at = ? WHERE id = ?`
-      ).run(now, now, id);
-    } else {
-      this.db.prepare(
-        `UPDATE approval_embeddings SET denial_count = denial_count + 1, last_denied_at = ?, updated_at = ? WHERE id = ?`
-      ).run(now, now, id);
-    }
-  }
-
-  deleteApprovalEmbedding(id: number): boolean {
-    const result = this.db.prepare('DELETE FROM approval_embeddings WHERE id = ?').run(id);
-    return result.changes > 0;
-  }
-
-  recordApprovalDecision(data: {
-    sessionId: string;
-    taskId: string | null;
-    projectPath: string | null;
-    toolName: string;
-    toolInputText: string | null;
-    decision: 'approved' | 'denied' | 'auto_approved';
-    decisionSource: 'user' | 'adaptive' | 'autopilot' | 'dangerous';
-    similarityScore: number | null;
-    matchedEmbeddingId: number | null;
-  }): void {
-    this.db.prepare(
-      `INSERT INTO approval_decisions (session_id, task_id, project_path, tool_name, tool_input_text, decision, decision_source, similarity_score, matched_embedding_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      data.sessionId,
-      data.taskId,
-      data.projectPath,
-      data.toolName,
-      data.toolInputText,
-      data.decision,
-      data.decisionSource,
-      data.similarityScore,
-      data.matchedEmbeddingId,
-      new Date().toISOString()
-    );
-  }
-
-  getApprovalDecisions(projectPath: string | null, limit = 50): {
-    id: number;
-    sessionId: string;
-    taskId: string | null;
-    toolName: string;
-    decision: string;
-    decisionSource: string;
-    similarityScore: number | null;
-    createdAt: string;
-  }[] {
-    let query = 'SELECT * FROM approval_decisions WHERE ';
-    const params: unknown[] = [];
-
-    if (projectPath === null) {
-      query += 'project_path IS NULL';
-    } else {
-      query += 'project_path = ?';
-      params.push(projectPath);
-    }
-
-    query += ' ORDER BY created_at DESC LIMIT ?';
-    params.push(limit);
-
-    const rows = this.db.prepare(query).all(...params) as {
-      id: number;
-      session_id: string;
-      task_id: string | null;
-      tool_name: string;
-      decision: string;
-      decision_source: string;
-      similarity_score: number | null;
-      created_at: string;
-    }[];
-
-    return rows.map(r => ({
-      id: r.id,
-      sessionId: r.session_id,
-      taskId: r.task_id,
-      toolName: r.tool_name,
-      decision: r.decision,
-      decisionSource: r.decision_source,
-      similarityScore: r.similarity_score,
-      createdAt: r.created_at,
-    }));
-  }
-
-  hasProjectPatterns(projectPath: string): boolean {
-    const result = this.db.prepare(
-      'SELECT COUNT(*) as count FROM approval_embeddings WHERE project_path = ?'
-    ).get(projectPath) as { count: number };
-    return result.count > 0;
-  }
-
-  getGlobalPatternCount(): number {
-    const result = this.db.prepare(
-      'SELECT COUNT(*) as count FROM approval_embeddings WHERE project_path IS NULL'
-    ).get() as { count: number };
-    return result.count;
-  }
-
-  copyGlobalPatternsToProject(projectPath: string, minApprovals = 3): number {
-    // Copy global patterns with high approval counts to a new project
-    const result = this.db.prepare(
-      `INSERT INTO approval_embeddings (project_path, tool_name, tool_input_text, embedding, approval_count, denial_count, created_at, updated_at)
-       SELECT ?, tool_name, tool_input_text, embedding, 0, 0, datetime('now'), datetime('now')
-       FROM approval_embeddings
-       WHERE project_path IS NULL
-         AND approval_count >= ?
-         AND denial_count = 0`
-    ).run(projectPath, minApprovals);
-    return result.changes;
-  }
-
-  getRecentToolCalls(projectPath: string, limit = 100): {
-    toolName: string;
-    toolInput: Record<string, unknown>;
-    timestamp: string;
-  }[] {
-    // Match by session project_path OR by cwd in raw_data JSON
-    // This handles both transcript events (project_path on session) and hook events (cwd in raw_data)
-    const rows = this.db.prepare(
-      `SELECT e.tool_name, e.tool_input, e.timestamp
-       FROM events e
-       LEFT JOIN sessions s ON e.session_id = s.id
-       WHERE (
-         s.project_path = ?
-         OR s.project_path LIKE ?
-         OR json_extract(e.raw_data, '$.cwd') = ?
-         OR json_extract(e.raw_data, '$.cwd') LIKE ?
-       )
-         AND e.tool_name IS NOT NULL
-         AND e.tool_input IS NOT NULL
-         AND e.tool_name NOT IN ('Read', 'Glob', 'Grep')
-       ORDER BY e.timestamp DESC
-       LIMIT ?`
-    ).all(projectPath, `%${projectPath}%`, projectPath, `%${projectPath}%`, limit) as { tool_name: string; tool_input: string; timestamp: string }[];
-
-    return rows.map(r => {
-      let toolInput: Record<string, unknown> = {};
-      try {
-        toolInput = JSON.parse(r.tool_input);
-      } catch {
-        // Invalid JSON
-      }
-      return {
-        toolName: r.tool_name,
-        toolInput,
-        timestamp: r.timestamp,
-      };
-    });
-  }
-
-  getProjectPatternCount(projectPath: string): number {
-    const row = this.db.prepare(
-      'SELECT COUNT(*) as count FROM approval_embeddings WHERE project_path = ?'
-    ).get(projectPath) as { count: number };
-    return row?.count || 0;
-  }
-
-  getDecisionsBySession(sessionId: string, limit = 50): {
-    id: number;
-    toolName: string;
-    toolInputText: string | null;
-    decision: string;
-    decisionSource: string;
-    similarityScore: number | null;
-    createdAt: string;
-  }[] {
-    const rows = this.db.prepare(
-      `SELECT id, tool_name, tool_input_text, decision, decision_source, similarity_score, created_at
-       FROM approval_decisions
-       WHERE session_id = ?
-       ORDER BY created_at DESC
-       LIMIT ?`
-    ).all(sessionId, limit) as {
-      id: number;
-      tool_name: string;
-      tool_input_text: string | null;
-      decision: string;
-      decision_source: string;
-      similarity_score: number | null;
-      created_at: string;
-    }[];
-
-    return rows.map(r => ({
-      id: r.id,
-      toolName: r.tool_name,
-      toolInputText: r.tool_input_text,
-      decision: r.decision,
-      decisionSource: r.decision_source,
-      similarityScore: r.similarity_score,
-      createdAt: r.created_at,
-    }));
-  }
-
-  getDecisionCountsBySession(sessionId: string): {
-    approved: number;
-    denied: number;
-    autoApproved: number;
-  } {
-    const row = this.db.prepare(
-      `SELECT
-         SUM(CASE WHEN decision = 'approved' THEN 1 ELSE 0 END) as approved,
-         SUM(CASE WHEN decision = 'denied' THEN 1 ELSE 0 END) as denied,
-         SUM(CASE WHEN decision = 'auto_approved' THEN 1 ELSE 0 END) as auto_approved
-       FROM approval_decisions
-       WHERE session_id = ?`
-    ).get(sessionId) as { approved: number; denied: number; auto_approved: number } | undefined;
-
-    return {
-      approved: row?.approved || 0,
-      denied: row?.denied || 0,
-      autoApproved: row?.auto_approved || 0,
-    };
-  }
-
-  // Approval Rules
-  getApprovalRules(projectPath: string | null, toolName?: string): {
-    id: number;
-    projectPath: string | null;
-    toolName: string;
-    pattern: string;
-    patternType: string;
-    ruleType: string;
-    description: string | null;
-    matchCount: number;
-    lastMatchedAt: string | null;
-    createdAt: string;
-  }[] {
-    let query = 'SELECT * FROM approval_rules WHERE ';
-    const params: unknown[] = [];
-
-    if (projectPath === null) {
-      query += 'project_path IS NULL';
-    } else {
-      query += 'project_path = ?';
-      params.push(projectPath);
-    }
-
-    if (toolName) {
-      query += ' AND tool_name = ?';
-      params.push(toolName);
-    }
-
-    query += ' ORDER BY created_at DESC';
-
-    const rows = this.db.prepare(query).all(...params) as {
-      id: number;
-      project_path: string | null;
-      tool_name: string;
-      pattern: string;
-      pattern_type: string;
-      rule_type: string;
-      description: string | null;
-      match_count: number;
-      last_matched_at: string | null;
-      created_at: string;
-    }[];
-
-    return rows.map(r => ({
-      id: r.id,
-      projectPath: r.project_path,
-      toolName: r.tool_name,
-      pattern: r.pattern,
-      patternType: r.pattern_type,
-      ruleType: r.rule_type,
-      description: r.description,
-      matchCount: r.match_count,
-      lastMatchedAt: r.last_matched_at,
-      createdAt: r.created_at,
-    }));
-  }
-
-  getAllApprovalRulesForProject(projectPath: string): {
-    id: number;
-    projectPath: string | null;
-    toolName: string;
-    pattern: string;
-    patternType: string;
-    ruleType: string;
-    matchCount: number;
-  }[] {
-    // Get both project-specific and global rules
-    const rows = this.db.prepare(
-      `SELECT * FROM approval_rules
-       WHERE project_path = ? OR project_path IS NULL
-       ORDER BY project_path DESC, created_at DESC`
-    ).all(projectPath) as {
-      id: number;
-      project_path: string | null;
-      tool_name: string;
-      pattern: string;
-      pattern_type: string;
-      rule_type: string;
-      match_count: number;
-    }[];
-
-    return rows.map(r => ({
-      id: r.id,
-      projectPath: r.project_path,
-      toolName: r.tool_name,
-      pattern: r.pattern,
-      patternType: r.pattern_type,
-      ruleType: r.rule_type,
-      matchCount: r.match_count,
-    }));
-  }
-
-  createApprovalRule(data: {
-    projectPath: string | null;
-    toolName: string;
-    pattern: string;
-    patternType: 'exact' | 'prefix' | 'glob' | 'directory' | 'contains';
-    ruleType: 'allow' | 'deny';
-    description?: string;
-  }): number {
-    const now = new Date().toISOString();
-    const result = this.db.prepare(
-      `INSERT INTO approval_rules (project_path, tool_name, pattern, pattern_type, rule_type, description, match_count, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
-    ).run(
-      data.projectPath,
-      data.toolName,
-      data.pattern,
-      data.patternType,
-      data.ruleType,
-      data.description || null,
-      now,
-      now
-    );
-    return result.lastInsertRowid as number;
-  }
-
-  updateRuleMatchCount(id: number): void {
-    const now = new Date().toISOString();
-    this.db.prepare(
-      `UPDATE approval_rules SET match_count = match_count + 1, last_matched_at = ?, updated_at = ? WHERE id = ?`
-    ).run(now, now, id);
-  }
-
-  deleteApprovalRule(id: number): boolean {
-    const result = this.db.prepare('DELETE FROM approval_rules WHERE id = ?').run(id);
-    return result.changes > 0;
-  }
-
-  promoteRuleToGlobal(id: number): number | null {
-    const rule = this.db.prepare('SELECT * FROM approval_rules WHERE id = ?').get(id) as {
-      tool_name: string;
-      pattern: string;
-      pattern_type: string;
-      rule_type: string;
-      description: string | null;
-    } | undefined;
-
-    if (!rule) return null;
-
-    // Check if similar global rule exists
-    const existing = this.db.prepare(
-      `SELECT id FROM approval_rules
-       WHERE project_path IS NULL AND tool_name = ? AND pattern = ?`
-    ).get(rule.tool_name, rule.pattern) as { id: number } | undefined;
-
-    if (existing) return existing.id;
-
-    // Create new global rule
-    const now = new Date().toISOString();
-    const result = this.db.prepare(
-      `INSERT INTO approval_rules (project_path, tool_name, pattern, pattern_type, rule_type, description, match_count, created_at, updated_at)
-       VALUES (NULL, ?, ?, ?, ?, ?, 0, ?, ?)`
-    ).run(rule.tool_name, rule.pattern, rule.pattern_type, rule.rule_type, rule.description, now, now);
-
-    return result.lastInsertRowid as number;
-  }
-
-  // Get recent tool calls for rule creation
-  getRecentToolCallsForRules(projectPath: string, limit = 50): {
-    toolName: string;
-    toolInput: Record<string, unknown>;
-    count: number;
-    lastUsed: string;
-  }[] {
-    // Get unique tool calls grouped by tool_name and normalized input
-    const rows = this.db.prepare(
-      `SELECT
-         e.tool_name,
-         e.tool_input,
-         COUNT(*) as count,
-         MAX(e.timestamp) as last_used
-       FROM events e
-       LEFT JOIN sessions s ON e.session_id = s.id
-       WHERE e.tool_name IS NOT NULL
-         AND e.tool_input IS NOT NULL
-         AND e.tool_name IN ('Bash', 'Write', 'Edit', 'NotebookEdit')
-         AND (
-           s.project_path = ?
-           OR s.project_path LIKE ?
-           OR json_extract(e.raw_data, '$.cwd') = ?
-           OR json_extract(e.raw_data, '$.cwd') LIKE ?
-         )
-       GROUP BY e.tool_name, e.tool_input
-       ORDER BY count DESC, last_used DESC
-       LIMIT ?`
-    ).all(projectPath, `%${projectPath}%`, projectPath, `%${projectPath}%`, limit) as {
-      tool_name: string;
-      tool_input: string;
-      count: number;
-      last_used: string;
-    }[];
-
-    return rows.map(r => {
-      let toolInput: Record<string, unknown> = {};
-      try {
-        toolInput = JSON.parse(r.tool_input);
-      } catch {
-        // Invalid JSON
-      }
-      return {
-        toolName: r.tool_name,
-        toolInput,
-        count: r.count,
-        lastUsed: r.last_used,
-      };
-    });
-  }
-
-  getRuleCount(projectPath: string | null): number {
-    if (projectPath === null) {
-      const row = this.db.prepare(
-        'SELECT COUNT(*) as count FROM approval_rules WHERE project_path IS NULL'
-      ).get() as { count: number };
-      return row?.count || 0;
-    }
-    const row = this.db.prepare(
-      'SELECT COUNT(*) as count FROM approval_rules WHERE project_path = ?'
-    ).get(projectPath) as { count: number };
-    return row?.count || 0;
   }
 }

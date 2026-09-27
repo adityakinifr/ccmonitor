@@ -12,3 +12,7 @@ dist/
 .wwebjs_cache/
 server/data/
 *.db-shm
+
+# SQLite side files (transient)
+data/*.db-shm
+data/*.db-wal

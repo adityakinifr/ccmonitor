@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   XAxis,
   YAxis,
@@ -28,31 +28,52 @@ export function CostTracker() {
   const [days, setDays] = useState(30);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
 
+  // Requests are tagged with the range that asked for them. Switching range
+  // while an auto-refresh is still in flight would otherwise let the older
+  // response land last and repaint the previous range's numbers.
+  const requestId = useRef(0);
+
   const fetchData = useCallback(async () => {
+    const ticket = ++requestId.current;
     try {
       const [costsData, statsData, todayData] = await Promise.all([
         getCosts(days),
         getStats(),
         getTodayCosts(),
       ]);
+      if (ticket !== requestId.current) return; // superseded by a newer request
       // Data comes from API in ascending order (oldest first) with gaps filled
       setCosts(costsData);
       setStats(statsData);
       setTodayCosts(todayData.costs);
       setLastUpdated(new Date());
     } catch (err) {
+      if (ticket !== requestId.current) return;
       setError((err as Error).message);
     } finally {
-      setLoading(false);
+      if (ticket === requestId.current) setLoading(false);
     }
   }, [days]);
 
+  // The timer must not close over a particular range. Re-creating the interval
+  // whenever `days` changed meant every range switch spawned a replacement, and
+  // any timer that outlived its cleanup kept refetching its own stale range and
+  // repainting the numbers under the new one. Instead: one interval for the
+  // component's lifetime, reading the newest fetch through a ref.
+  const latestFetch = useRef(fetchData);
+  useEffect(() => {
+    latestFetch.current = fetchData;
+  }, [fetchData]);
+
+  // Fetch immediately on mount and whenever the range changes.
   useEffect(() => {
     fetchData();
-    // Auto-refresh every 10 seconds
-    const interval = setInterval(fetchData, 10000);
-    return () => clearInterval(interval);
   }, [fetchData]);
+
+  useEffect(() => {
+    const interval = setInterval(() => latestFetch.current(), 10000);
+    return () => clearInterval(interval);
+  }, []);
 
   if (loading) {
     return (
@@ -120,12 +141,18 @@ export function CostTracker() {
   });
 
   const totalCost = costs.reduce((sum, c) => sum + c.costUsd, 0);
+  // getCostsByDay gap-fills to exactly `days` points, so a length mismatch
+  // means what is on screen still belongs to the range we switched away from.
+  const rangeIsStale = costs.length !== days;
   const totalCacheSavings = costs.reduce((sum, c) => sum + (c.cacheSavings || 0), 0);
   const totalCacheReadTokens = costs.reduce((sum, c) => sum + (c.cacheReadTokens || 0), 0);
   const totalCacheWriteTokens = costs.reduce((sum, c) => sum + (c.cacheWriteTokens || 0), 0);
 
-  // Calculate daily average
-  const avgDailyCost = costs.length > 0 ? totalCost / costs.length : 0;
+  // Average over days that actually had spend. Dividing by the full window
+  // (which is gap-filled to `days` entries) made the 30d projection a restatement
+  // of the 30d total, and flattened the average with idle days on every window.
+  const activeDays = costs.filter((c) => c.costUsd > 0).length;
+  const avgDailyCost = activeDays > 0 ? totalCost / activeDays : 0;
   const projectedMonthlyCost = avgDailyCost * 30;
 
   // Cache efficiency percentage
@@ -171,15 +198,25 @@ export function CostTracker() {
         <Card>
           <CardContent className="p-6">
             <p className="text-xs text-muted-foreground uppercase tracking-wide">Period Cost</p>
-            <p className="text-2xl font-bold text-emerald-400 mt-1">{formatCost(totalCost)}</p>
-            <p className="text-xs text-muted-foreground mt-1">Last {days} days</p>
+            <p
+              className={`text-2xl font-bold text-emerald-400 mt-1 transition-opacity ${
+                rangeIsStale ? 'opacity-40' : ''
+              }`}
+            >
+              {formatCost(totalCost)}
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              {rangeIsStale ? `Loading last ${days} days\u2026` : `Last ${days} days`}
+            </p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-6">
             <p className="text-xs text-muted-foreground uppercase tracking-wide">Projected Monthly</p>
             <p className="text-2xl font-bold text-orange-400 mt-1">{formatCost(projectedMonthlyCost)}</p>
-            <p className="text-xs text-muted-foreground mt-1">Based on avg/day</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              {formatCost(avgDailyCost)}/day over {activeDays} active {activeDays === 1 ? 'day' : 'days'}
+            </p>
           </CardContent>
         </Card>
         <Card>

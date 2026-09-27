@@ -72,6 +72,11 @@ export function registerStatsRoutes(app: FastifyInstance, repo: Repository): voi
     });
   });
 
+  // Context health: what fills the context window and what it costs
+  app.get('/api/stats/context-health', async (_request, reply) => {
+    return reply.send(repo.getContextHealth());
+  });
+
   // Project stats
   app.get('/api/stats/projects', async (_request, reply) => {
     const projects = repo.getProjectStats();

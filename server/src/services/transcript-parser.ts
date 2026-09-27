@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'fs';
+import { closeSync, openSync, readSync, statSync } from 'fs';
 import type { Repository } from '../db/repository.js';
 import type {
   TranscriptEntry,
@@ -26,9 +26,15 @@ export class TranscriptParser {
 
       // If file is smaller than our position, it was likely truncated/recreated
       const readFrom = stat.size < startPosition ? 0 : startPosition;
+      if (readFrom >= stat.size) {
+        return events;
+      }
 
-      const content = readFileSync(filePath, 'utf8');
-      const lines = content.split('\n').filter((line) => line.trim());
+      // Read only the bytes appended since last time. Transcripts grow to tens
+      // of megabytes and every watcher event used to re-read and re-parse the
+      // whole file from byte zero.
+      const { text, endPosition } = this.readFrom(filePath, readFrom, stat.size);
+      const lines = text.split('\n').filter((line) => line.trim());
 
       // Extract session ID from file path
       // Path format: ~/.claude/projects/<hash>/<session-id>.jsonl
@@ -46,8 +52,8 @@ export class TranscriptParser {
         }
       }
 
-      // Update file position
-      this.repo.setFilePosition(filePath, stat.size);
+      // Resume from the last complete line, not necessarily EOF.
+      this.repo.setFilePosition(filePath, endPosition);
     } catch (error) {
       console.error(`[TranscriptParser] Error parsing ${filePath}:`, error);
     }
@@ -55,8 +61,42 @@ export class TranscriptParser {
     return events;
   }
 
+  /**
+   * Read bytes [from, size) and return only whole lines. A transcript may be
+   * mid-write, so any trailing partial line is left for the next pass and the
+   * returned position stops at the last newline. Slicing on \n is safe for
+   * UTF-8: 0x0A never occurs inside a multi-byte sequence.
+   */
+  private readFrom(
+    filePath: string,
+    from: number,
+    size: number
+  ): { text: string; endPosition: number } {
+    const length = size - from;
+    const buffer = Buffer.allocUnsafe(length);
+    const fd = openSync(filePath, 'r');
+    try {
+      readSync(fd, buffer, 0, length, from);
+    } finally {
+      closeSync(fd);
+    }
+
+    const lastNewline = buffer.lastIndexOf(0x0a);
+    if (lastNewline === -1) {
+      return { text: '', endPosition: from };
+    }
+    return {
+      text: buffer.subarray(0, lastNewline + 1).toString('utf8'),
+      endPosition: from + lastNewline + 1,
+    };
+  }
+
   private processEntry(entry: TranscriptEntry, sessionId: string): EventItem | null {
-    // Skip if we've already processed this entry
+    // Skip only a genuinely repeated line. Note this is NOT the same as a
+    // repeated message id: Claude Code writes one API response as several
+    // lines (one per content block), each carrying its own uuid and a copy of
+    // the same usage. Those lines are distinct content and must be kept -- the
+    // billing is deduplicated in processAssistantEntry instead.
     if (entry.uuid && this.repo.checkEventExists(sessionId, entry.uuid)) {
       return null;
     }
@@ -91,6 +131,13 @@ export class TranscriptParser {
       const toolResults = entry.message.content.filter((c) => c.type === 'tool_result');
       if (toolResults.length > 0) {
         isToolResult = true;
+        // Resolve the tool this answers: its name (for attribution) and, for
+        // MCP tools, the success/error counters.
+        for (const result of toolResults) {
+          if (result.tool_use_id) {
+            toolName = this.repo.resolveToolCall(result.tool_use_id, !result.is_error) || toolName;
+          }
+        }
         content = toolResults
           .map((c) => {
             const prefix = c.is_error ? '[Error] ' : '';
@@ -115,6 +162,7 @@ export class TranscriptParser {
       tool_input: null,
       tool_response: isToolResult ? content.slice(0, 5000) : null,
       content: content.slice(0, 5000),
+      result_bytes: isToolResult ? Buffer.byteLength(content, 'utf8') : null,
       tokens_input: null,
       tokens_output: null,
       cache_read_tokens: null,
@@ -123,6 +171,7 @@ export class TranscriptParser {
       timestamp: entry.timestamp,
       uuid: entry.uuid,
       parent_uuid: entry.parentUuid,
+      message_id: null,
       raw_data: JSON.stringify(entry),
     });
 
@@ -166,26 +215,34 @@ export class TranscriptParser {
           textContent += `[Tool: ${block.name}] ${inputStr.slice(0, 500)}\n`;
         }
 
-        // Track MCP tools
-        if (block.name.startsWith('mcp__')) {
-          this.repo.upsertMcpTool(sessionId, block.name, true);
-        }
+        // Record the call so its result can be attributed back to this tool.
+        // Outcome is unknown here -- it arrives on the matching tool_result.
+        this.repo.recordToolInvocation(sessionId, block.name, block.id);
       }
     }
 
-    // Calculate tokens and cost
-    const tokens = extractTokens(usage);
-    const cost = calculateCost(model, usage);
+    // One API response can span several transcript lines, each repeating the
+    // same usage. Bill the first line we see for a message id and record the
+    // rest at zero, so the content is kept without counting the response twice.
+    const messageId = message.id || null;
+    const alreadyBilled = messageId ? this.repo.checkMessageExists(messageId) : false;
 
-    // Update session totals (use totalInput for accurate count)
-    this.repo.upsertSession({
-      id: sessionId,
-      total_input_tokens: tokens.totalInput,
-      total_output_tokens: tokens.output,
-      total_cache_read_tokens: tokens.cacheRead,
-      total_cache_write_tokens: tokens.cacheWrite,
-      total_cost_usd: cost,
-    });
+    const raw = extractTokens(usage);
+    const tokens = alreadyBilled
+      ? { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, totalInput: 0 }
+      : raw;
+    const cost = alreadyBilled ? 0 : calculateCost(model, usage);
+
+    if (!alreadyBilled) {
+      this.repo.upsertSession({
+        id: sessionId,
+        total_input_tokens: tokens.totalInput,
+        total_output_tokens: tokens.output,
+        total_cache_read_tokens: tokens.cacheRead,
+        total_cache_write_tokens: tokens.cacheWrite,
+        total_cost_usd: cost,
+      });
+    }
 
     const eventId = this.repo.insertEvent({
       session_id: sessionId,
@@ -200,11 +257,13 @@ export class TranscriptParser {
       tokens_output: tokens.output,
       cache_read_tokens: tokens.cacheRead,
       cache_write_tokens: tokens.cacheWrite,
+      result_bytes: null,
       cost,
       model,
       timestamp: entry.timestamp,
       uuid: entry.uuid,
       parent_uuid: entry.parentUuid,
+      message_id: messageId,
       raw_data: JSON.stringify(entry),
     });
 

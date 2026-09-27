@@ -7,8 +7,6 @@ import { Repository } from './db/repository.js';
 import { registerEventsRoutes } from './routes/events.js';
 import { registerSessionsRoutes } from './routes/sessions.js';
 import { registerStatsRoutes } from './routes/stats.js';
-import { registerTasksRoutes } from './routes/tasks.js';
-import { registerAdaptiveRoutes } from './routes/adaptive.js';
 import { registerWhatsAppRoutes } from './routes/whatsapp.js';
 import { registerWhatsAppBusinessRoutes } from './routes/whatsapp-business.js';
 import { wsBroadcaster } from './services/websocket.js';
@@ -53,8 +51,6 @@ async function main() {
   registerEventsRoutes(app, repo);
   registerSessionsRoutes(app, repo);
   registerStatsRoutes(app, repo);
-  registerTasksRoutes(app, repo);
-  registerAdaptiveRoutes(app, repo);
   registerWhatsAppRoutes(app);
   registerWhatsAppBusinessRoutes(app);
 

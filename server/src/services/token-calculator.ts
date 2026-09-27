@@ -10,20 +10,27 @@ interface ModelPricing {
   cacheReadPerMillion: number;
 }
 
-function pricing(input: number, output: number): ModelPricing {
+// cacheRead defaults to 0.1x input, but some models publish a lower flat rate
+// (Fable 5.1 at $0.25/MTok, Opus 5.5 at $0.20/MTok) -- pass it explicitly there.
+function pricing(input: number, output: number, cacheRead = input * 0.1): ModelPricing {
   return {
     inputPerMillion: input,
     outputPerMillion: output,
     cacheWrite5mPerMillion: input * 1.25,
     cacheWrite1hPerMillion: input * 2,
-    cacheReadPerMillion: input * 0.1,
+    cacheReadPerMillion: cacheRead,
   };
 }
 
 // Ordered prefix match so dated variants (e.g. claude-haiku-4-5-20251001) resolve.
+// Longest prefix must come first: 'claude-opus-5-5' has to be matched before
+// 'claude-opus-5', or Opus 5.5 silently bills at Opus 5's higher rate.
 const MODEL_PRICING: Array<[string, ModelPricing]> = [
+  ['claude-fable-5-1', pricing(10.0, 50.0, 0.25)],
+  ['claude-mythos-5-1', pricing(10.0, 50.0, 0.25)],
   ['claude-fable-5', pricing(10.0, 50.0)],
   ['claude-mythos-5', pricing(10.0, 50.0)],
+  ['claude-opus-5-5', pricing(4.0, 20.0, 0.20)],
   ['claude-opus-5', pricing(5.0, 25.0)],
   ['claude-opus-4-8', pricing(5.0, 25.0)],
   ['claude-opus-4-7', pricing(5.0, 25.0)],

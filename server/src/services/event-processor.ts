@@ -42,6 +42,8 @@ export class EventProcessor {
       timestamp: event.timestamp,
       uuid: null,
       parent_uuid: null,
+      message_id: null,
+      result_bytes: null,
       raw_data: JSON.stringify(event),
     });
 

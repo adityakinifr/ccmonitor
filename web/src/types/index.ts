@@ -34,7 +34,10 @@ export interface McpToolStats {
   toolName: string;
   serverName: string | null;
   invocationCount: number;
-  successRate: number;
+  // Calls whose tool_result has been seen; successRate is null until one has.
+  resolvedCount: number;
+  errorCount: number;
+  successRate: number | null;
   avgDurationMs: number;
 }
 
@@ -57,69 +60,10 @@ export interface Stats {
   mcpToolsUsed: number;
 }
 
-export interface TaskItem {
-  id: string;
-  sessionId: string | null;
-  title: string;
-  tier: 'routine' | 'important' | 'urgent';
-  status: 'queued' | 'working' | 'done';
-  autopilot: boolean;
-  adaptiveMode: boolean;
-  machine: string | null;
-  cwd: string | null;
-  manual: boolean;
-  createdAt: string;
-  completedAt: string | null;
-}
-
-// Adaptive mode types
-export interface ApprovalPattern {
-  id: number;
-  projectPath: string | null;
-  toolName: string;
-  toolInputText: string;
-  approvalCount: number;
-  denialCount: number;
-  lastApprovedAt: string | null;
-  lastDeniedAt: string | null;
-}
-
-export interface AdaptiveStats {
-  totalGlobalPatterns: number;
-  recentDecisions: ApprovalDecision[];
-  topTools: {
-    tool: string;
-    approved: number;
-    denied: number;
-  }[];
-}
-
-export interface ApprovalDecision {
-  id: number;
-  sessionId?: string;
-  taskId?: string | null;
-  toolName: string;
-  toolInputText?: string | null;
-  decision: string;
-  decisionSource: string;
-  similarityScore: number | null;
-  createdAt: string;
-}
-
-export interface DecisionCounts {
-  approved: number;
-  denied: number;
-  autoApproved: number;
-}
-
-export interface SessionDecisions {
-  decisions: ApprovalDecision[];
-  counts: DecisionCounts;
-}
 
 export interface WsMessage {
-  type: 'event' | 'session_start' | 'session_end' | 'stats_update' | 'task_created' | 'task_updated' | 'task_deleted';
-  payload: EventItem | SessionSummary | McpToolStats[] | Stats | TaskItem | { id: string };
+  type: 'event' | 'session_start' | 'session_end' | 'stats_update';
+  payload: EventItem | SessionSummary | McpToolStats[] | Stats;
 }
 
 export interface SessionDetail {
@@ -134,38 +78,6 @@ export interface SessionDetail {
   totalCacheWriteTokens: number;
   totalCostUsd: number;
   version: string | null;
-}
-
-// Approval Rules (new approach)
-export interface ApprovalRule {
-  id: number;
-  projectPath: string | null;
-  toolName: string;
-  pattern: string;
-  patternType: 'exact' | 'prefix' | 'glob' | 'directory' | 'contains';
-  ruleType: 'allow' | 'deny';
-  description: string | null;
-  matchCount: number;
-  lastMatchedAt: string | null;
-  createdAt: string;
-}
-
-export interface ToolCallPart {
-  type: 'tool' | 'directory' | 'file' | 'command' | 'value';
-  value: string;
-  label: string;
-}
-
-export interface RecentToolCall {
-  toolName: string;
-  toolInput: Record<string, unknown>;
-  count: number;
-  lastUsed: string;
-  parts: ToolCallPart[];
-  normalizedText: string;
-  similarCount: number;
-  suggestedPattern?: string;
-  suggestedPatternType?: string;
 }
 
 // WhatsApp types
@@ -217,4 +129,40 @@ export interface WhatsAppBusinessSetup {
   verifyToken: string;
   fields: string[];
   notes?: string[];
+}
+
+export interface ContextHealth {
+  summary: {
+    avgContextTokens: number;
+    callsOverThreshold: number;
+    totalCalls: number;
+    rebuildCalls: number;
+    rebuildCost: number;
+    totalCost: number;
+    oversizedResults: number;
+  };
+  distribution: { bucket: string; calls: number; cost: number }[];
+  rebuildsByCause: { cause: string; calls: number; cost: number }[];
+  rebuildSessions: {
+    sessionId: string;
+    projectName: string | null;
+    calls: number;
+    cost: number;
+    unexplained: number;
+  }[];
+  byTool: {
+    toolName: string;
+    results: number;
+    totalBytes: number;
+    avgBytes: number;
+    maxBytes: number;
+    oversized: number;
+  }[];
+  worstResults: {
+    id: number;
+    sessionId: string;
+    toolName: string | null;
+    bytes: number;
+    timestamp: string;
+  }[];
 }

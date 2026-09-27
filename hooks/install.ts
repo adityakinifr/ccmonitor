@@ -14,12 +14,6 @@ const __dirname = dirname(__filename);
 
 const CLAUDE_SETTINGS_PATH = join(homedir(), '.claude', 'settings.json');
 const FORWARD_SCRIPT_PATH = join(__dirname, 'forward.js');
-const AUTOPILOT_HOOK_PATH = join(__dirname, 'autopilot-hook.js');
-const PERMISSION_HOOK_PATH = join(__dirname, 'permission-hook.js');
-const RESUME_HOOK_PATH = join(__dirname, 'resume-hook.js');
-const STOP_HOOK_PATH = join(__dirname, 'stop-hook.js');
-const SESSION_END_HOOK_PATH = join(__dirname, 'session-end-hook.js');
-const ADAPTIVE_RECORD_HOOK_PATH = join(__dirname, 'adaptive-record-hook.js');
 
 interface HookConfig {
   type: string;
@@ -35,12 +29,14 @@ type HookEventMap = {
   UserPromptSubmit: HookWithMatcher[];
   PreToolUse: HookWithMatcher[];
   PostToolUse: HookWithMatcher[];
-  PermissionRequest: HookWithMatcher[];
-  Stop: HookWithMatcher[];
   SessionStart: HookWithMatcher[];
   SessionEnd: HookWithMatcher[];
   [key: string]: HookWithMatcher[];
 };
+
+// Events ccmonitor used to register but no longer does (task board / adaptive mode).
+// Stale entries are purged from settings on install so they can't point at deleted scripts.
+const RETIRED_HOOK_EVENTS = ['PermissionRequest', 'Stop'];
 
 interface ClaudeSettings {
   hooks?: Partial<HookEventMap>;
@@ -56,10 +52,6 @@ const CCMONITOR_HOOKS: HookEventMap = {
           type: 'command',
           command: `node "${FORWARD_SCRIPT_PATH}"`,
         },
-        {
-          type: 'command',
-          command: `node "${RESUME_HOOK_PATH}"`,
-        },
       ],
     },
   ],
@@ -71,10 +63,6 @@ const CCMONITOR_HOOKS: HookEventMap = {
           type: 'command',
           command: `node "${FORWARD_SCRIPT_PATH}"`,
         },
-        {
-          type: 'command',
-          command: `node "${AUTOPILOT_HOOK_PATH}"`,
-        },
       ],
     },
   ],
@@ -85,32 +73,6 @@ const CCMONITOR_HOOKS: HookEventMap = {
         {
           type: 'command',
           command: `node "${FORWARD_SCRIPT_PATH}"`,
-        },
-        {
-          type: 'command',
-          command: `node "${ADAPTIVE_RECORD_HOOK_PATH}"`,
-        },
-      ],
-    },
-  ],
-  PermissionRequest: [
-    {
-      matcher: '*',
-      hooks: [
-        {
-          type: 'command',
-          command: `node "${PERMISSION_HOOK_PATH}"`,
-        },
-      ],
-    },
-  ],
-  Stop: [
-    {
-      matcher: '*',
-      hooks: [
-        {
-          type: 'command',
-          command: `node "${STOP_HOOK_PATH}"`,
         },
       ],
     },
@@ -133,10 +95,6 @@ const CCMONITOR_HOOKS: HookEventMap = {
         {
           type: 'command',
           command: `node "${FORWARD_SCRIPT_PATH}"`,
-        },
-        {
-          type: 'command',
-          command: `node "${SESSION_END_HOOK_PATH}"`,
         },
       ],
     },
@@ -177,6 +135,17 @@ function install(): void {
   const settings = loadSettings();
   settings.hooks = settings.hooks || {};
 
+  // Purge hooks for events we no longer register (they'd point at deleted scripts).
+  for (const eventName of RETIRED_HOOK_EVENTS) {
+    const existing = (settings.hooks[eventName] as HookWithMatcher[]) || [];
+    const kept = existing.filter((h) => !isOurMatcherHook(h));
+    if (kept.length > 0) {
+      settings.hooks[eventName] = kept;
+    } else {
+      delete settings.hooks[eventName];
+    }
+  }
+
   for (const [eventName, hooks] of Object.entries(CCMONITOR_HOOKS)) {
     // All hooks now use the matcher-based format
     const existingHooks = (settings.hooks[eventName] as HookWithMatcher[]) || [];
@@ -192,19 +161,12 @@ function install(): void {
   console.log('Hooks installed successfully!');
   console.log(`Settings file: ${CLAUDE_SETTINGS_PATH}`);
   console.log('\nInstalled hooks for:');
-  console.log('  - UserPromptSubmit (forward + resume task)');
-  console.log('  - PreToolUse (forward + autopilot/adaptive)');
-  console.log('  - PostToolUse (forward + adaptive learning)');
-  console.log('  - PermissionRequest (autopilot auto-approve)');
-  console.log('  - Stop (mark task done)');
+  console.log('  - UserPromptSubmit (forward)');
+  console.log('  - PreToolUse (forward)');
+  console.log('  - PostToolUse (forward)');
   console.log('  - SessionStart (forward)');
-  console.log('  - SessionEnd (forward + delete task)');
+  console.log('  - SessionEnd (forward)');
   console.log('\nMake sure the ccmonitor server is running on http://localhost:3456');
-  console.log('\nTask management features:');
-  console.log('  - Sessions auto-register as tasks');
-  console.log('  - Autopilot mode auto-approves all tool calls');
-  console.log('  - Adaptive mode learns from user approvals');
-  console.log('  - Tasks track status: queued, working, done');
 }
 
 function uninstall(): void {

@@ -151,15 +151,25 @@ export function McpStats() {
                       {tool.invocationCount}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Badge
-                        variant={
-                          tool.successRate >= 90 ? 'default' :
-                          tool.successRate >= 70 ? 'secondary' : 'destructive'
-                        }
-                        className="font-mono"
-                      >
-                        {tool.successRate.toFixed(1)}%
-                      </Badge>
+                      {tool.successRate === null ? (
+                        <span
+                          className="font-mono text-muted-foreground"
+                          title="No tool results recorded for this tool yet"
+                        >
+                          &mdash;
+                        </span>
+                      ) : (
+                        <Badge
+                          variant={
+                            tool.successRate >= 90 ? 'default' :
+                            tool.successRate >= 70 ? 'secondary' : 'destructive'
+                          }
+                          className="font-mono"
+                          title={`${tool.resolvedCount} of ${tool.invocationCount} calls resolved`}
+                        >
+                          {tool.successRate.toFixed(1)}%
+                        </Badge>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
