@@ -3,7 +3,7 @@ import { join } from 'path';
 
 export const config = {
   port: parseInt(process.env.PORT || '3456', 10),
-  host: process.env.HOST || '0.0.0.0',
+  host: process.env.HOST || '127.0.0.1',
 
   // Database
   dbPath: process.env.DB_PATH || join(process.cwd(), '..', 'data', 'ccmonitor.db'),
